@@ -1,0 +1,34 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.body {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+  gap: 1px;
+  background: var(--border-dim);
+  margin-top: 38px;
+}
+
+.left {
+  display: flex;
+  flex-direction: column;
+  width: 340px;
+  min-width: 300px;
+  background: var(--bg);
+  overflow: hidden;
+  gap: 1px;
+}
+
+.right {
+  flex: 1;
+  background: var(--bg-panel);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}

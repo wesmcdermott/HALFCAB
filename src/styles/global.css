@@ -1,0 +1,60 @@
+/* ─── Tokens ─────────────────────────────────────────────────────── */
+:root {
+  --bg:           #0a0a0a;
+  --bg-panel:     #111111;
+  --bg-raised:    #181818;
+  --bg-hover:     #202020;
+  --border:       #222222;
+  --border-dim:   #1a1a1a;
+  --text:         #e8e8e8;
+  --text-dim:     #888888;
+  --text-dimmer:  #555555;
+
+  /* Halfcab accent — Z-BOY green */
+  --accent:       #2a9d8f;
+  --accent-hi:    #36b5a5;
+  --accent-lo:    #1a6b62;
+  --accent-glow:  rgba(42,157,143,0.18);
+
+  --success:      #4caf6e;
+  --danger:       #c05a55;
+  --warn:         #c9a02a;
+
+  --mono:  'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
+  --sans:  -apple-system, 'Inter', system-ui, sans-serif;
+  --r:     4px;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body, #root {
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+body {
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 13px;
+  line-height: 1.4;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+button { font-family: inherit; cursor: pointer; }
+input, textarea { font-family: inherit; color: var(--text); }
+
+/* titlebar drag */
+.titlebar-drag {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  height: 38px;
+  -webkit-app-region: drag;
+  z-index: 9999;
+  pointer-events: none;
+}
+
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }

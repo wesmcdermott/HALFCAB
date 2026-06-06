@@ -1,0 +1,56 @@
+{
+  "name": "halfcab",
+  "productName": "Halfcab",
+  "version": "1.0.0",
+  "description": "Halfcab — AI video to professional HDR color space converter",
+  "main": "main.js",
+  "scripts": {
+    "dev": "concurrently -n vite,electron -c cyan,yellow \"vite\" \"wait-on http://localhost:5175 && NODE_ENV=development electron .\"",
+    "build": "vite build",
+    "start": "electron .",
+    "dist:mac": "vite build && electron-builder --mac"
+  },
+  "build": {
+    "appId": "com.halfcab.app",
+    "productName": "Halfcab",
+    "icon": "build/halfcab.icns",
+    "directories": { "output": "release" },
+    "files": [
+      "dist/**/*",
+      "main.js",
+      "preload.js",
+      "backend/**/*",
+      "!node_modules/**/*"
+    ],
+    "asar": true,
+    "asarUnpack": ["backend/**/*"],
+    "mac": {
+      "icon": "build/halfcab.icns",
+      "category": "public.app-category.video",
+      "identity": null,
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
+      "target": [
+        { "target": "dmg", "arch": ["arm64", "x64"] },
+        { "target": "zip", "arch": ["arm64", "x64"] }
+      ]
+    },
+    "dmg": {
+      "icon": "build/halfcab.icns",
+      "title": "Halfcab",
+      "window": { "width": 540, "height": 380 }
+    }
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.2",
+    "electron": "^33.4.0",
+    "electron-builder": "^26.8.1",
+    "vite": "^6.0.11",
+    "wait-on": "^8.0.1"
+  }
+}
