@@ -688,7 +688,7 @@ def ml_status():
         return jsonify(ok=False, error='PyTorch not installed')
 
     weights_ok = os.path.exists(
-        os.path.join(os.path.dirname(__file__), '..', 'ml_models', 'ITMLUT', 'params.pth'))
+        os.path.join(os.path.dirname(__file__), '..', 'ml_models', 'GMNet', 'checkpoints', 'G_synthetic.pth'))
 
     return jsonify(ok=True, device=device, mps=mps, cuda=cuda, weights=weights_ok)
 
@@ -699,23 +699,25 @@ _ml_progress = {}
 @app.route('/ml-convert', methods=['POST'])
 def ml_convert_route():
     """
-    ML-enhanced conversion using ITMLUT inverse tone mapping.
-    Runs asynchronously — returns a job_id immediately.
-    Poll /ml-progress/<job_id> for updates.
+    ML-enhanced gain-map SDR→HDR conversion (GMNet).
+    output_format: 'prores' (HLG video) or 'exr' (linear sequence for AE/Nuke).
+    Runs asynchronously — returns a job_id; poll /ml-progress/<job_id>.
     """
     import threading, uuid
     body      = request.json
     src       = body['input']
     peak_nits = body.get('peak_nits', 1000)
     out_dir   = body.get('output_dir') or None
-    weights   = body.get('weights', None)   # 'hdrtv4k' or 'tv1k'
+    out_fmt   = body.get('output_format', 'prores')   # 'prores' | 'exr'
 
     if not os.path.exists(src):
         return jsonify(ok=False, error='File not found')
 
-    base = os.path.splitext(os.path.basename(src))[0]
-    out  = os.path.join(out_dir or os.path.dirname(src),
-                        f'{base}_halfcab_v2_ml.mov')
+    base   = os.path.splitext(os.path.basename(src))[0]
+    folder = out_dir or os.path.dirname(src)
+    out    = (os.path.join(folder, f'{base}_halfcab_v2_exr')
+              if out_fmt == 'exr'
+              else os.path.join(folder, f'{base}_halfcab_v2_ml.mov'))
 
     job_id = str(uuid.uuid4())[:8]
     _ml_progress[job_id] = {'done': 0, 'total': 0, 'status': 'starting', 'output': None, 'error': None}
@@ -723,18 +725,20 @@ def ml_convert_route():
     def run():
         try:
             sys.path.insert(0, os.path.dirname(__file__))
-            from ml_enhance import ml_convert, WEIGHTS, WEIGHTS_TV
-            w = WEIGHTS_TV if weights == 'tv1k' else WEIGHTS
+            from ml_enhance import ml_convert
             _ml_progress[job_id]['status'] = 'running'
 
             def cb(done, total):
                 _ml_progress[job_id].update({'done': done, 'total': total, 'status': 'running'})
 
-            result = ml_convert(src, out, peak_nits=peak_nits, weights_path=w, progress_cb=cb)
-            _ml_progress[job_id].update({'status': 'done', 'output': result, 'done': _ml_progress[job_id]['total']})
+            result = ml_convert(src, out, peak_nits=peak_nits,
+                                output_format=out_fmt, progress_cb=cb)
+            _ml_progress[job_id].update({'status': 'done', 'output': result,
+                                         'done': _ml_progress[job_id]['total']})
         except Exception as e:
             import traceback
-            _ml_progress[job_id].update({'status': 'error', 'error': str(e) + '\n' + traceback.format_exc()})
+            _ml_progress[job_id].update({'status': 'error',
+                                         'error': str(e) + '\n' + traceback.format_exc()})
 
     threading.Thread(target=run, daemon=True).start()
     return jsonify(ok=True, job_id=job_id)

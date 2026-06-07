@@ -179,12 +179,72 @@ def get_video_info(path):
     }
 
 
-def ml_convert(src, out_path, peak_nits=1000, weights_path=None, progress_cb=None):
+def _ml_convert_exr(src, out_dir, weights_path=None, progress_cb=None):
     """
-    Full ML gain-map SDR→HDR conversion → ProRes 4444 HLG.
+    Scene-linear EXR sequence for After Effects / Nuke 32bpc compositing.
+
+    Writes numbered .exr frames carrying genuine scene-linear HDR:
+      1.0 = diffuse/SDR reference white
+      >1.0 = overbright lights, specular, highlights (lamp ≈ 2.5)
+    Rec.709 primaries, linear — AE reads as linear float, lights composite
+    with real overbright energy (glows, blooms, exposure all work correctly).
+    """
+    import torch, cv2
+    from PIL import Image
+
+    device = (torch.device('mps') if torch.backends.mps.is_available()
+              else torch.device('cuda') if torch.cuda.is_available()
+              else torch.device('cpu'))
+    print(f'[ml_enhance] EXR mode, device: {device}', flush=True)
+
+    net  = _load_gmnet(device)
+    info = get_video_info(src)
+    w, h = info['width'], info['height']
+
+    # out_dir is a folder for the sequence (strip any file extension)
+    base = os.path.splitext(os.path.basename(src))[0]
+    seq_dir = out_dir if (os.path.isdir(out_dir) or not os.path.splitext(out_dir)[1]) \
+              else os.path.splitext(out_dir)[0]
+    os.makedirs(seq_dir, exist_ok=True)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        in_pat = os.path.join(tmp, 'in_%06d.png')
+        subprocess.run([FFMPEG, '-y', '-i', src,
+                        '-vf', f'scale={w}:{h},gradfun=strength=1.5:radius=16,format=rgb24',
+                        in_pat], check=True, capture_output=True)
+        frames = sorted(glob.glob(os.path.join(tmp, 'in_*.png')))
+        total = len(frames)
+        print(f'[ml_enhance] {total} frames → EXR', flush=True)
+
+        for i, fp in enumerate(frames):
+            rgb  = np.array(Image.open(fp).convert('RGB'), dtype=np.uint8)
+            gain = infer_gainmap(rgb, device, net)
+            hdr  = sdr_to_hdr(rgb, gain, peak=8.0)        # scene-linear Rec.709 [0,12]
+            # cv2 writes BGR float EXR; overbright >1.0 preserved
+            cv2.imwrite(os.path.join(seq_dir, f'{base}_{i+1:06d}.exr'),
+                        hdr[:, :, ::-1].astype(np.float32))
+            if progress_cb:
+                progress_cb(i + 1, total)
+
+    print(f'[ml_enhance] done → {seq_dir}/ ({total} EXR frames)', flush=True)
+    return seq_dir
+
+
+def ml_convert(src, out_path, peak_nits=1000, weights_path=None,
+               output_format='prores', progress_cb=None):
+    """
+    Full ML gain-map SDR→HDR conversion.
+
+    output_format:
+      'prores' → HLG Rec.2020 ProRes 4444 .mov  (video delivery: Premiere, broadcast)
+      'exr'    → scene-linear EXR sequence       (compositing: After Effects/Nuke 32bpc,
+                 genuine overbright values >1.0 for lights/highlights)
     """
     import torch
     from PIL import Image
+
+    if output_format == 'exr':
+        return _ml_convert_exr(src, out_path, weights_path, progress_cb)
 
     if torch.backends.mps.is_available():
         device = torch.device('mps')
