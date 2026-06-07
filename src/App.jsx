@@ -17,6 +17,8 @@ export default function App() {
   const [toneStrength, setToneStr]  = useState(85)
   const [outputDir, setOutputDir]   = useState('')
   const [converting, setConverting] = useState(false)
+  const [mlMode, setMlMode]         = useState(false)   // v2 ML enhance toggle
+  const [mlJobs, setMlJobs]         = useState({})      // jobId → progress
   const [activeFile, setActiveFile] = useState(null)   // file path for scopes preview
   const [scopeMode, setScopeMode]   = useState('waveform')
 
@@ -81,6 +83,43 @@ export default function App() {
     setFiles(prev => prev.map(f => f.status === 'done' ? { ...f, status: 'idle', output: null } : f))
   }
 
+  // ── ML convert (v2) ──────────────────────────────────────────────────────
+  const mlConvertAll = async () => {
+    const pending = files.filter(f => f.status === 'idle' || f.status === 'error')
+    if (!pending.length) return
+    setConverting(true)
+
+    for (const file of pending) {
+      setFiles(prev => prev.map(f => f.path === file.path ? { ...f, status: 'converting', progress: 0, mlProgress: 'Starting ML…' } : f))
+      try {
+        const res = await fetch(`${API}/ml-convert`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ input: file.path, peak_nits: peakNits, output_dir: outputDir || null })
+        }).then(r => r.json())
+
+        if (!res.ok) throw new Error(res.error)
+        const jobId = res.job_id
+
+        // Poll until done
+        await new Promise((resolve, reject) => {
+          const poll = setInterval(async () => {
+            const p = await fetch(`${API}/ml-progress/${jobId}`).then(r => r.json())
+            const label = p.total > 0 ? `Frame ${p.done}/${p.total}` : p.status
+            setFiles(prev => prev.map(f => f.path === file.path ? { ...f, mlProgress: label } : f))
+            if (p.status === 'done') { clearInterval(poll); resolve(p.output) }
+            if (p.status === 'error') { clearInterval(poll); reject(new Error(p.error)) }
+          }, 800)
+        }).then(output => {
+          setFiles(prev => prev.map(f => f.path === file.path ? { ...f, status: 'done', output } : f))
+        })
+      } catch (e) {
+        setFiles(prev => prev.map(f => f.path === file.path ? { ...f, status: 'error', error: e.message.slice(0, 200) } : f))
+      }
+    }
+    setConverting(false)
+  }
+
   return (
     <div className={styles.root}>
       <div className="titlebar-drag" />
@@ -110,11 +149,14 @@ export default function App() {
             }}
           />
           <ConvertButton
-            onClick={convertAll}
+            onClick={mlMode ? mlConvertAll : convertAll}
             converting={converting}
             count={files.filter(f => f.status === 'idle' || f.status === 'error').length}
             doneCount={files.filter(f => f.status === 'done').length}
             onReset={resetDone}
+            mlMode={mlMode}
+            onMlMode={setMlMode}
+            mlProgress={files.find(f => f.status === 'converting')?.mlProgress}
           />
         </div>
 

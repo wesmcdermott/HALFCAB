@@ -675,6 +675,79 @@ def analyze():
     )
 
 
+@app.route('/ml-status')
+def ml_status():
+    """Check whether ML model weights are present and PyTorch/MPS are available."""
+    import importlib
+    try:
+        import torch
+        mps = torch.backends.mps.is_available()
+        cuda = torch.cuda.is_available()
+        device = 'mps' if mps else ('cuda' if cuda else 'cpu')
+    except ImportError:
+        return jsonify(ok=False, error='PyTorch not installed')
+
+    weights_ok = os.path.exists(
+        os.path.join(os.path.dirname(__file__), '..', 'ml_models', 'ITMLUT', 'params.pth'))
+
+    return jsonify(ok=True, device=device, mps=mps, cuda=cuda, weights=weights_ok)
+
+
+# Per-job progress tracking
+_ml_progress = {}
+
+@app.route('/ml-convert', methods=['POST'])
+def ml_convert_route():
+    """
+    ML-enhanced conversion using ITMLUT inverse tone mapping.
+    Runs asynchronously — returns a job_id immediately.
+    Poll /ml-progress/<job_id> for updates.
+    """
+    import threading, uuid
+    body      = request.json
+    src       = body['input']
+    peak_nits = body.get('peak_nits', 1000)
+    out_dir   = body.get('output_dir') or None
+    weights   = body.get('weights', None)   # 'hdrtv4k' or 'tv1k'
+
+    if not os.path.exists(src):
+        return jsonify(ok=False, error='File not found')
+
+    base = os.path.splitext(os.path.basename(src))[0]
+    out  = os.path.join(out_dir or os.path.dirname(src),
+                        f'{base}_halfcab_v2_ml.mov')
+
+    job_id = str(uuid.uuid4())[:8]
+    _ml_progress[job_id] = {'done': 0, 'total': 0, 'status': 'starting', 'output': None, 'error': None}
+
+    def run():
+        try:
+            sys.path.insert(0, os.path.dirname(__file__))
+            from ml_enhance import ml_convert, WEIGHTS, WEIGHTS_TV
+            w = WEIGHTS_TV if weights == 'tv1k' else WEIGHTS
+            _ml_progress[job_id]['status'] = 'running'
+
+            def cb(done, total):
+                _ml_progress[job_id].update({'done': done, 'total': total, 'status': 'running'})
+
+            result = ml_convert(src, out, peak_nits=peak_nits, weights_path=w, progress_cb=cb)
+            _ml_progress[job_id].update({'status': 'done', 'output': result, 'done': _ml_progress[job_id]['total']})
+        except Exception as e:
+            import traceback
+            _ml_progress[job_id].update({'status': 'error', 'error': str(e) + '\n' + traceback.format_exc()})
+
+    threading.Thread(target=run, daemon=True).start()
+    return jsonify(ok=True, job_id=job_id)
+
+
+@app.route('/ml-progress/<job_id>')
+def ml_progress(job_id):
+    p = _ml_progress.get(job_id)
+    if not p:
+        return jsonify(ok=False, error='Job not found')
+    return jsonify(ok=True, **p)
+
+
 @app.route('/health')
 def health():
     return jsonify(ok=True)
