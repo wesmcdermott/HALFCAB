@@ -103,6 +103,14 @@ _R709_TO_R2020 = np.array([
     [0.0163914, 0.0880133, 0.8955953],
 ], dtype=np.float32)
 
+# Rec.709 (linear) → ACEScg (AP1 primaries, linear) — standard ACES IDT matrix.
+# This is what a VFX/Nuke/Resolve ACES pipeline expects for incoming plates.
+_R709_TO_ACESCG = np.array([
+    [0.6130974, 0.3395229, 0.0473793],
+    [0.0701933, 0.9163556, 0.0134511],
+    [0.0206156, 0.1095698, 0.8698151],
+], dtype=np.float32)
+
 # HLG OETF constants (BT.2100 / ARIB STD-B67)
 _HLG_A, _HLG_B, _HLG_C = 0.17883277, 0.28466892, 0.55991073
 
@@ -164,6 +172,51 @@ def hdr_linear_to_hlg(hdr_lin_709):
     return np.clip(signal, 0, 1).astype(np.float32)
 
 
+def hdr_linear_to_graded(hdr_lin_709, knee=0.80, gamma=2.4):
+    """
+    Convert scene-linear Rec.709 HDR → a CLEANLY-EXPOSED Rec.2020 video
+    signal [0,1] with a smooth highlight shoulder — no clamping, no banding.
+
+    Instead of forcing overbright into a curve that then crushes (banding),
+    we use the HDR reconstruction to inform a filmic roll-off:
+      - values below `knee` (well-exposed midtones/shadows) pass through 1:1,
+        preserving exposure
+      - values above `knee` (the overbright the gain map recovered) roll
+        smoothly into the remaining [knee,1] headroom via a tanh shoulder,
+        asymptotic to 1.0 — so the lamp's recovered detail becomes a graceful
+        falloff a colorist can pull back, not a hard clip
+
+    Result: 12-bit Rec.2020, full tonal detail, smooth gradients, grade-ready.
+    """
+    h, w, _ = hdr_lin_709.shape
+    # Gamut: Rec.709 → Rec.2020 (linear)
+    r2020 = (hdr_lin_709.reshape(-1, 3) @ _R709_TO_R2020.T).reshape(h, w, 3)
+    r2020 = np.clip(r2020, 0, None)
+
+    # Filmic shoulder on linear light: identity below knee, tanh roll above
+    x = r2020
+    rolled = np.where(
+        x <= knee,
+        x,
+        knee + (1.0 - knee) * np.tanh((x - knee) / (1.0 - knee))
+    )
+    rolled = np.clip(rolled, 0, 1)
+
+    # Encode to gamma 2.4 (Rec.2020 SDR-range transfer) for the 12-bit container
+    signal = np.power(rolled, 1.0 / gamma)
+    return signal.astype(np.float32)
+
+
+def hdr_linear_to_acescg(hdr_lin_709):
+    """
+    Convert scene-linear Rec.709 HDR → ACEScg (AP1 primaries, linear).
+    Overbright values (>1.0) preserved — for VFX/Nuke/Resolve ACES pipelines.
+    """
+    h, w, _ = hdr_lin_709.shape
+    acescg = (hdr_lin_709.reshape(-1, 3) @ _R709_TO_ACESCG.T).reshape(h, w, 3)
+    return np.clip(acescg, 0, None).astype(np.float32)
+
+
 # ─── Video helpers ─────────────────────────────────────────────────────────
 
 def get_video_info(path):
@@ -179,15 +232,17 @@ def get_video_info(path):
     }
 
 
-def _ml_convert_exr(src, out_dir, weights_path=None, progress_cb=None):
+def _ml_convert_exr(src, out_dir, colorspace='rec709', weights_path=None, progress_cb=None):
     """
-    Scene-linear EXR sequence for After Effects / Nuke 32bpc compositing.
+    Scene-linear EXR sequence for compositing (After Effects / Nuke / Resolve).
 
     Writes numbered .exr frames carrying genuine scene-linear HDR:
       1.0 = diffuse/SDR reference white
       >1.0 = overbright lights, specular, highlights (lamp ≈ 2.5)
-    Rec.709 primaries, linear — AE reads as linear float, lights composite
-    with real overbright energy (glows, blooms, exposure all work correctly).
+
+    colorspace:
+      'rec709' → linear Rec.709 primaries  (After Effects default linear comp)
+      'acescg' → ACEScg / AP1 primaries    (VFX/Nuke/Resolve ACES pipeline)
     """
     import torch, cv2
     from PIL import Image
@@ -195,13 +250,12 @@ def _ml_convert_exr(src, out_dir, weights_path=None, progress_cb=None):
     device = (torch.device('mps') if torch.backends.mps.is_available()
               else torch.device('cuda') if torch.cuda.is_available()
               else torch.device('cpu'))
-    print(f'[ml_enhance] EXR mode, device: {device}', flush=True)
+    print(f'[ml_enhance] EXR mode ({colorspace}), device: {device}', flush=True)
 
     net  = _load_gmnet(device)
     info = get_video_info(src)
     w, h = info['width'], info['height']
 
-    # out_dir is a folder for the sequence (strip any file extension)
     base = os.path.splitext(os.path.basename(src))[0]
     seq_dir = out_dir if (os.path.isdir(out_dir) or not os.path.splitext(out_dir)[1]) \
               else os.path.splitext(out_dir)[0]
@@ -214,19 +268,21 @@ def _ml_convert_exr(src, out_dir, weights_path=None, progress_cb=None):
                         in_pat], check=True, capture_output=True)
         frames = sorted(glob.glob(os.path.join(tmp, 'in_*.png')))
         total = len(frames)
-        print(f'[ml_enhance] {total} frames → EXR', flush=True)
+        print(f'[ml_enhance] {total} frames → EXR ({colorspace})', flush=True)
 
         for i, fp in enumerate(frames):
             rgb  = np.array(Image.open(fp).convert('RGB'), dtype=np.uint8)
             gain = infer_gainmap(rgb, device, net)
             hdr  = sdr_to_hdr(rgb, gain, peak=8.0)        # scene-linear Rec.709 [0,12]
+            if colorspace == 'acescg':
+                hdr = hdr_linear_to_acescg(hdr)            # → AP1 primaries
             # cv2 writes BGR float EXR; overbright >1.0 preserved
             cv2.imwrite(os.path.join(seq_dir, f'{base}_{i+1:06d}.exr'),
                         hdr[:, :, ::-1].astype(np.float32))
             if progress_cb:
                 progress_cb(i + 1, total)
 
-    print(f'[ml_enhance] done → {seq_dir}/ ({total} EXR frames)', flush=True)
+    print(f'[ml_enhance] done → {seq_dir}/ ({total} EXR frames, {colorspace})', flush=True)
     return seq_dir
 
 
@@ -236,15 +292,22 @@ def ml_convert(src, out_path, peak_nits=1000, weights_path=None,
     Full ML gain-map SDR→HDR conversion.
 
     output_format:
-      'prores' → HLG Rec.2020 ProRes 4444 .mov  (video delivery: Premiere, broadcast)
-      'exr'    → scene-linear EXR sequence       (compositing: After Effects/Nuke 32bpc,
-                 genuine overbright values >1.0 for lights/highlights)
+      'prores'        → HLG Rec.2020 ProRes — true HDR video (Premiere/broadcast).
+                        HDR lives in the HLG curve; signal is [0,1].
+      'graded'        → Rec.2020 ProRes with HDR-informed filmic shoulder.
+                        Cleanly exposed [0,1], smooth highlights, NO banding,
+                        headroom for grading. Uses the HDR reconstruction to
+                        improve exposure without forcing overbright.
+      'exr'           → scene-linear EXR, Rec.709 (After Effects 32bpc comp).
+      'exr_acescg'    → scene-linear EXR, ACEScg/AP1 (VFX/Nuke/Resolve ACES).
     """
     import torch
     from PIL import Image
 
     if output_format == 'exr':
-        return _ml_convert_exr(src, out_path, weights_path, progress_cb)
+        return _ml_convert_exr(src, out_path, 'rec709', weights_path, progress_cb)
+    if output_format == 'exr_acescg':
+        return _ml_convert_exr(src, out_path, 'acescg', weights_path, progress_cb)
 
     if torch.backends.mps.is_available():
         device = torch.device('mps')
@@ -279,15 +342,17 @@ def ml_convert(src, out_path, peak_nits=1000, weights_path=None,
         total = len(frames)
         print(f'[ml_enhance] {total} frames', flush=True)
 
+        graded = (output_format == 'graded')
         for i, fp in enumerate(frames):
             rgb    = np.array(Image.open(fp).convert('RGB'), dtype=np.uint8)
             gain   = infer_gainmap(rgb, device, net)
             hdr    = sdr_to_hdr(rgb, gain, peak=model_peak)  # linear Rec.709 [0,12]
-            signal = hdr_linear_to_hlg(hdr)                  # HLG Rec.2020 signal [0,1]
+            if graded:
+                signal = hdr_linear_to_graded(hdr)           # filmic shoulder, gamma 2.4
+            else:
+                signal = hdr_linear_to_hlg(hdr)              # HLG signal [0,1]
 
-            # Write 16-bit PNG (HLG signal, already color-converted).
-            # Final TPDF dither at 16-bit quantisation — final safety against
-            # banding in the encoded signal. cv2 expects BGR uint16.
+            # Final TPDF dither at 16-bit quantisation. cv2 expects BGR uint16.
             tpdf = (np.random.random(signal.shape).astype(np.float32) -
                     np.random.random(signal.shape).astype(np.float32))
             sig16 = np.clip(signal * 65535.0 + tpdf * 0.5, 0, 65535).astype(np.uint16)
@@ -296,19 +361,21 @@ def ml_convert(src, out_path, peak_nits=1000, weights_path=None,
             if progress_cb:
                 progress_cb(i + 1, total)
 
-        # Encode: frames already carry HLG-encoded Rec.2020 signal.
-        # FFmpeg just packs to 12-bit and TAGS the metadata — no conversion.
         os.makedirs(os.path.dirname(out_path) or '.', exist_ok=True)
         print('[ml_enhance] encoding …', flush=True)
+
+        # graded mode: Rec.2020 gamma-2.4 (SDR-range transfer, gradeable)
+        # prores mode: Rec.2020 HLG (true HDR curve)
+        trc = 'bt709' if graded else 'arib-std-b67'
         subprocess.run([
             FFMPEG, '-y',
             '-framerate', str(fps),
             '-i', out_pat,
             '-i', src, '-map', '0:v', '-map', '1:a?',
-            '-vf', 'setparams=color_primaries=bt2020:color_trc=arib-std-b67:'
-                   'colorspace=bt2020nc,format=yuv444p12le',
+            '-vf', f'setparams=color_primaries=bt2020:color_trc={trc}:'
+                   f'colorspace=bt2020nc,format=yuv444p12le',
             '-c:v', 'prores_ks', '-profile:v', '4444', '-pix_fmt', 'yuva444p12le',
-            '-color_primaries', 'bt2020', '-color_trc', 'arib-std-b67',
+            '-color_primaries', 'bt2020', '-color_trc', trc,
             '-colorspace', 'bt2020nc',
             '-c:a', 'copy', out_path,
         ], check=True, capture_output=True)

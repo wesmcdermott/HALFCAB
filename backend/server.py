@@ -715,9 +715,13 @@ def ml_convert_route():
 
     base   = os.path.splitext(os.path.basename(src))[0]
     folder = out_dir or os.path.dirname(src)
-    out    = (os.path.join(folder, f'{base}_halfcab_v2_exr')
-              if out_fmt == 'exr'
-              else os.path.join(folder, f'{base}_halfcab_v2_ml.mov'))
+    _names = {
+        'prores':     f'{base}_halfcab_v2_hlg.mov',
+        'graded':     f'{base}_halfcab_v2_graded.mov',
+        'exr':        f'{base}_halfcab_v2_exr',
+        'exr_acescg': f'{base}_halfcab_v2_acescg',
+    }
+    out = os.path.join(folder, _names.get(out_fmt, _names['prores']))
 
     job_id = str(uuid.uuid4())[:8]
     _ml_progress[job_id] = {'done': 0, 'total': 0, 'status': 'starting', 'output': None, 'error': None}
