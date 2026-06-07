@@ -63,17 +63,16 @@ def ailut_transform_pytorch(img, lut, vertices):
         # grid_sample maps -1 → index 0, +1 → index D-1
         grid_coords = frac_lut / (D - 1) * 2.0 - 1.0   # (3, H*W)
 
-        # Rearrange for 3D grid_sample
-        # input:  (N=1, C=3, D, D, D)
-        # grid:   (N=1, D_out=1, H_out=H, W_out=W, 3)
-        # grid[..., 0] → W dim of lut (B channel)
-        # grid[..., 1] → H dim of lut (G channel)
-        # grid[..., 2] → D dim of lut (R channel)
-        r_g = grid_coords[0].reshape(1, H, W)   # R coords
-        g_g = grid_coords[1].reshape(1, H, W)   # G coords
-        b_g = grid_coords[2].reshape(1, H, W)   # B coords
-        # Stack as (x,y,z) = (B,G,R) for LUT dim ordering (D,D,D) = (R,G,B)
-        grid = torch.stack([b_g, g_g, r_g], dim=-1)  # (1,H,W,3)
+        # Rearrange for 3D grid_sample.
+        # From CUDA source (ailut_transform_cpu.cpp):
+        #   id = rid + stride_lut*gid + stride_lut^2*bid
+        #   → LUT dims (PyTorch): (D_B, D_G, D_R) i.e. dim2=B, dim3=G, dim4=R
+        # grid_sample 5D: grid[...,0]=x→W(dim4=R), grid[...,1]=y→H(dim3=G), grid[...,2]=z→D(dim2=B)
+        # Therefore: grid = [R_coord, G_coord, B_coord]
+        r_g = grid_coords[0].reshape(1, H, W)   # R coords → x (W dim = R axis)
+        g_g = grid_coords[1].reshape(1, H, W)   # G coords → y (H dim = G axis)
+        b_g = grid_coords[2].reshape(1, H, W)   # B coords → z (D dim = B axis)
+        grid = torch.stack([r_g, g_g, b_g], dim=-1)  # (1,H,W,3) ← definitive order
         grid = grid.unsqueeze(1)                       # (1,1,H,W,3)
 
         out = F.grid_sample(
