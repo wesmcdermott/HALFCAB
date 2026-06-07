@@ -88,8 +88,9 @@ def infer_gainmap(frame_rgb_uint8, device, net, thumb=384):
         _, gain_q = net((local, global_ctx))   # gain_q = qmax * normalized_gainmap
 
     gain = torch.clamp(gain_q, 0, None)         # (1,1,H',W')
-    # Upsample gain map to full frame size
-    gain = F.interpolate(gain, size=(h, w), mode='bilinear', align_corners=False)
+    # Upsample gain map to full frame size (bicubic = smoother than bilinear)
+    gain = F.interpolate(gain, size=(h, w), mode='bicubic', align_corners=False)
+    gain = torch.clamp(gain, 0, None)
     return gain.squeeze(0).squeeze(0).cpu().numpy().astype(np.float32)
 
 
@@ -117,7 +118,7 @@ def _hlg_oetf(E):
                     _HLG_A * np.log(np.maximum(12.0 * E - _HLG_B, 1e-6)) + _HLG_C)
 
 
-def sdr_to_hdr(frame_rgb_uint8, gainmap, peak=8.0):
+def sdr_to_hdr(frame_rgb_uint8, gainmap, peak=8.0, dither=True):
     """
     Gain-map SDR→HDR producing scene-linear Rec.709 HDR (Ultra-HDR style).
 
@@ -126,8 +127,21 @@ def sdr_to_hdr(frame_rgb_uint8, gainmap, peak=8.0):
     Preserves the SDR base (gain=0 → unchanged), boosts flagged regions
     up to peak× brighter. 1.0 = SDR reference white; values above are
     genuine HDR headroom. Returns (H,W,3) float32 linear Rec.709.
+
+    Dithering: the 8-bit source has only ~256 code values. When a smooth
+    gradient is expanded into the wider HDR range, the gaps between codes
+    become visible as banding. We add triangular (TPDF) dither of ±0.5
+    code step in the gamma domain *before* linearizing — this breaks the
+    source quantisation into imperceptible noise the eye averages out,
+    so the expansion has continuous values to work with.
     """
-    sdr_lin = np.power(frame_rgb_uint8.astype(np.float32) / 255.0, 2.2)
+    sdr = frame_rgb_uint8.astype(np.float32) / 255.0
+    if dither:
+        step = 1.0 / 255.0
+        tpdf = (np.random.random(sdr.shape).astype(np.float32) -
+                np.random.random(sdr.shape).astype(np.float32))   # [-1,1] triangular
+        sdr = np.clip(sdr + tpdf * step * 0.5, 0.0, 1.0)
+    sdr_lin = np.power(sdr, 2.2)
     g = np.clip(gainmap, 0, 1)[..., None]
     hdr = sdr_lin * np.power(peak, g)
     return np.clip(hdr, 0, 12.0).astype(np.float32)
@@ -193,9 +207,13 @@ def ml_convert(src, out_path, peak_nits=1000, weights_path=None, progress_cb=Non
         in_pat  = os.path.join(tmp, 'in_%06d.png')
         out_pat = os.path.join(tmp, 'hlg_%06d.png')
 
-        # Extract frames
+        # Extract frames with debanding. gradfun smooths the 8-bit source
+        # gradients (lamp glows, sky) BEFORE the HDR expansion amplifies the
+        # quantisation steps into visible bands. Applied in the source gamma
+        # domain where the banding originates. radius 16 covers soft halos.
         subprocess.run([FFMPEG, '-y', '-i', src,
-                        '-vf', f'scale={w}:{h},format=rgb24', in_pat],
+                        '-vf', f'scale={w}:{h},gradfun=strength=1.5:radius=16,'
+                               f'format=rgb24', in_pat],
                        check=True, capture_output=True)
         frames = sorted(glob.glob(os.path.join(tmp, 'in_*.png')))
         total = len(frames)
@@ -207,9 +225,12 @@ def ml_convert(src, out_path, peak_nits=1000, weights_path=None, progress_cb=Non
             hdr    = sdr_to_hdr(rgb, gain, peak=model_peak)  # linear Rec.709 [0,12]
             signal = hdr_linear_to_hlg(hdr)                  # HLG Rec.2020 signal [0,1]
 
-            # Write 16-bit PNG (HLG signal, already color-converted)
-            # cv2 handles uint16 RGB; expects BGR channel order
-            sig16 = (signal * 65535).astype(np.uint16)
+            # Write 16-bit PNG (HLG signal, already color-converted).
+            # Final TPDF dither at 16-bit quantisation — final safety against
+            # banding in the encoded signal. cv2 expects BGR uint16.
+            tpdf = (np.random.random(signal.shape).astype(np.float32) -
+                    np.random.random(signal.shape).astype(np.float32))
+            sig16 = np.clip(signal * 65535.0 + tpdf * 0.5, 0, 65535).astype(np.uint16)
             cv2.imwrite(os.path.join(tmp, f'hlg_{i+1:06d}.png'), sig16[:, :, ::-1])
 
             if progress_cb:
