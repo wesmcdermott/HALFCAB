@@ -40,3 +40,4 @@ npm-debug.log*
 # Test output
 /tmp/
 ml_models/ITMLUT
+ml_models/GMNet
