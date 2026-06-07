@@ -251,13 +251,28 @@ def ml_convert(src, out_path, preset_id='prores', peak_nits=1000,
             # Run inference — output may exceed 1.0 at bright areas
             hdr_np = infer_frame(img_np, device, net)
 
-            # The model was trained on HDRTV4K (HLG-encoded HDR content).
-            # Its output is already in HLG signal space [0,1] where:
-            #   0.75 = reference white (203 nits)
-            #   >0.75 = HDR headroom zone (light sources, specular highlights)
-            #   1.0  = display peak (~1000 nits)
-            # So we just clamp negatives and encode directly — no remapping needed.
-            hdr_display = np.clip(hdr_np, 0, 1)
+            # Map model output (float HDR) to HLG signal for encoding.
+            #
+            # The model outputs linear-light HDR values where:
+            #   0.0  = black
+            #   1.0  = SDR reference white (the model's reference point)
+            #   >1.0 = genuine HDR overbrights (lamp, specular, sky highlights)
+            #   2.9  = brightest lamp — ~3× reference white
+            #
+            # HLG encoding maps these so:
+            #   model 0.0  → HLG 0.00  (black)
+            #   model 1.0  → HLG 0.75  (reference white, 203 nits)
+            #   model >1.0 → HLG 0.75–1.0  (HDR headroom zone)
+            #   model 2.9  → HLG ~0.998    (near display peak, very bright lamp)
+            #
+            # This preserves the genuine HDR values the model predicted.
+            hdr_clamped = np.clip(hdr_np, 0, None)   # only clamp negatives
+            hdr_display = np.where(
+                hdr_clamped <= 1.0,
+                hdr_clamped * 0.75,                          # SDR zone → 0–75% HLG
+                0.75 + 0.25 * np.tanh((hdr_clamped - 1.0) * 1.5)  # HDR shoulder
+            )
+            hdr_display = np.clip(hdr_display, 0, 1)
 
             # Save as 16-bit PPM — binary format FFmpeg reads natively
             # (PIL can't handle uint16 RGB; PPM avoids any extra dependencies)
