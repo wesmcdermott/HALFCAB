@@ -251,11 +251,13 @@ def ml_convert(src, out_path, preset_id='prores', peak_nits=1000,
             # Run inference — output may exceed 1.0 at bright areas
             hdr_np = infer_frame(img_np, device, net)
 
-            # Scale to target headroom and tone-map back to [0,1] for 16-bit storage
-            # Reinhard: out = hdr / (1 + hdr/peak) — preserves relative brightness
-            hdr_scaled = hdr_np * headroom
-            hdr_display = hdr_scaled / (1.0 + hdr_scaled / headroom)
-            hdr_display = np.clip(hdr_display, 0, 1)
+            # The model was trained on HDRTV4K (HLG-encoded HDR content).
+            # Its output is already in HLG signal space [0,1] where:
+            #   0.75 = reference white (203 nits)
+            #   >0.75 = HDR headroom zone (light sources, specular highlights)
+            #   1.0  = display peak (~1000 nits)
+            # So we just clamp negatives and encode directly — no remapping needed.
+            hdr_display = np.clip(hdr_np, 0, 1)
 
             # Save as 16-bit PPM — binary format FFmpeg reads natively
             # (PIL can't handle uint16 RGB; PPM avoids any extra dependencies)
@@ -281,8 +283,7 @@ def ml_convert(src, out_path, preset_id='prores', peak_nits=1000,
             '-c:v', 'prores_ks',
             '-profile:v', '4444',
             '-pix_fmt', 'yuva444p12le',
-            # Tag color metadata — same as v1 ProRes preset
-            '-vf', 'colorspace=all=bt2020nc:range=tv',
+            # Tag as HLG — frames are already HLG-mapped (ref white at 75%)
             '-color_primaries', 'bt2020',
             '-color_trc', 'arib-std-b67',
             '-colorspace', 'bt2020nc',
