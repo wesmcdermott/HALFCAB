@@ -104,12 +104,28 @@ _R709_TO_R2020 = np.array([
 ], dtype=np.float32)
 
 # Rec.709 (linear) → ACEScg (AP1 primaries, linear) — standard ACES IDT matrix.
-# This is what a VFX/Nuke/Resolve ACES pipeline expects for incoming plates.
+# ACEScg is the VFX/Nuke/Resolve working space.
 _R709_TO_ACESCG = np.array([
     [0.6130974, 0.3395229, 0.0473793],
     [0.0701933, 0.9163556, 0.0134511],
     [0.0206156, 0.1095698, 0.8698151],
 ], dtype=np.float32)
+
+# Rec.709 (linear) → ACES2065-1 (AP0 primaries, linear) — the ACES interchange
+# / archival standard (SMPTE ST 2065-1). Widest gamut, for delivery between
+# facilities.
+_R709_TO_ACES2065 = np.array([
+    [0.4397010, 0.3829780, 0.1773350],
+    [0.0897923, 0.8134230, 0.0967616],
+    [0.0175440, 0.1115440, 0.8707040],
+], dtype=np.float32)
+
+# Chromaticities (R x,y  G x,y  B x,y  W x,y) per colorspace, for EXR tagging
+EXR_CHROMA = {
+    'rec709':  (0.640, 0.330, 0.300, 0.600, 0.150, 0.060, 0.3127, 0.3290),
+    'acescg':  (0.713, 0.293, 0.165, 0.830, 0.128, 0.044, 0.32168, 0.33767),  # AP1
+    'aces2065':(0.7347, 0.2653, 0.0, 1.0, 0.0001, -0.0770, 0.32168, 0.33767), # AP0
+}
 
 # HLG OETF constants (BT.2100 / ARIB STD-B67)
 _HLG_A, _HLG_B, _HLG_C = 0.17883277, 0.28466892, 0.55991073
@@ -201,14 +217,16 @@ def hdr_linear_to_graded(hdr_lin_709, knee=0.80, gamma=2.4):
     return signal.astype(np.float32)
 
 
-def hdr_linear_to_acescg(hdr_lin_709):
+def hdr_linear_to_aces(hdr_lin_709, variant='acescg'):
     """
-    Convert scene-linear Rec.709 HDR → ACEScg (AP1 primaries, linear).
-    Overbright values (>1.0) preserved — for VFX/Nuke/Resolve ACES pipelines.
+    Convert scene-linear Rec.709 HDR → ACES, preserving overbright (>1.0).
+      'acescg'   → AP1 primaries (working space, Nuke/Resolve)
+      'aces2065' → AP0 primaries (ACES2065-1 interchange/archival)
     """
+    M = _R709_TO_ACESCG if variant == 'acescg' else _R709_TO_ACES2065
     h, w, _ = hdr_lin_709.shape
-    acescg = (hdr_lin_709.reshape(-1, 3) @ _R709_TO_ACESCG.T).reshape(h, w, 3)
-    return np.clip(acescg, 0, None).astype(np.float32)
+    aces = (hdr_lin_709.reshape(-1, 3) @ M.T).reshape(h, w, 3)
+    return np.clip(aces, 0, None).astype(np.float32)
 
 
 # ─── Video helpers ─────────────────────────────────────────────────────────
@@ -265,26 +283,32 @@ def _ml_convert_exr(src, out_dir, colorspace='rec709', weights_path=None, progre
         print(f'[ml_enhance] {total} frames → EXR ({colorspace})', flush=True)
 
         import OpenImageIO as oiio
-        # Chromaticities tags (R x,y  G x,y  B x,y  W x,y) so Nuke/Resolve/AE
-        # read the correct primaries instead of assuming sRGB.
-        CHROMA = {
-            'rec709': (0.640, 0.330, 0.300, 0.600, 0.150, 0.060, 0.3127, 0.3290),
-            'acescg': (0.713, 0.293, 0.165, 0.830, 0.128, 0.044, 0.32168, 0.33767),
-        }[colorspace]
+        chroma     = EXR_CHROMA[colorspace]
+        # OIIO internal scene-linear colorspace names (required for ACES container)
+        cs_name    = {'rec709': 'lin_rec709',
+                      'acescg': 'lin_ap1_scene',
+                      'aces2065': 'lin_ap0_scene'}[colorspace]
+        is_aces    = colorspace in ('acescg', 'aces2065')
 
         for i, fp in enumerate(frames):
             rgb  = np.array(Image.open(fp).convert('RGB'), dtype=np.uint8)
             gain = infer_gainmap(rgb, device, net)
             hdr  = sdr_to_hdr(rgb, gain, peak=8.0)        # scene-linear Rec.709 [0,12]
-            if colorspace == 'acescg':
-                hdr = hdr_linear_to_acescg(hdr)            # → AP1 primaries
+            if is_aces:
+                hdr = hdr_linear_to_aces(hdr, colorspace)  # → AP1 or AP0 primaries
 
-            # Write tagged float EXR via OpenImageIO (chromaticities embedded)
-            spec = oiio.ImageSpec(hdr.shape[1], hdr.shape[0], 3, 'float')
-            spec.attribute('chromaticities', 'float[8]', CHROMA)
-            spec.attribute('compression', 'zip')
-            spec.attribute('oiio:ColorSpace',
-                           'ACEScg' if colorspace == 'acescg' else 'Linear Rec.709')
+            # HALF float (16-bit) — EXR/ACES standard, preserves overbright.
+            spec = oiio.ImageSpec(hdr.shape[1], hdr.shape[0], 3, 'half')
+            spec.attribute('chromaticities', 'float[8]', chroma)
+            spec.attribute('oiio:ColorSpace', cs_name)
+            if colorspace == 'aces2065':
+                # Fully-compliant ACES container (SMPTE ST 2065-4):
+                # AP0 primaries, half, uncompressed, container flag.
+                spec.attribute('compression', 'none')
+                spec.attribute('acesImageContainerFlag', 1)
+            else:
+                # ACEScg / Rec.709: zip-compressed, identified by chromaticities.
+                spec.attribute('compression', 'zip')
             ibuf = oiio.ImageBuf(spec)
             ibuf.set_pixels(oiio.ROI(0, hdr.shape[1], 0, hdr.shape[0], 0, 1, 0, 3),
                             np.ascontiguousarray(hdr, dtype=np.float32))
@@ -307,8 +331,9 @@ def ml_convert(src, out_path, peak_nits=1000, weights_path=None,
                       then rolls it into a clean [0,1] gradeable master with a
                       filmic highlight shoulder. Bit-depth dither = no banding.
                       Well-exposed, headroom for finishing.  (DEFAULT)
-      'exr'         → scene-linear EXR, Linear Rec.709   (After Effects 32bpc)
-      'exr_acescg'  → scene-linear EXR, ACEScg / AP1     (Nuke/Resolve ACES)
+      'exr'           → scene-linear EXR, Linear Rec.709 (After Effects 32bpc)
+      'exr_acescg'    → scene-linear EXR, ACEScg / AP1    (Nuke/Resolve working space)
+      'exr_aces2065'  → scene-linear EXR, ACES2065-1/AP0  (ACES interchange/archival)
 
     (HLG video output was removed — it banded on 8-bit AI source.)
     """
@@ -319,6 +344,8 @@ def ml_convert(src, out_path, peak_nits=1000, weights_path=None,
         return _ml_convert_exr(src, out_path, 'rec709', weights_path, progress_cb)
     if output_format == 'exr_acescg':
         return _ml_convert_exr(src, out_path, 'acescg', weights_path, progress_cb)
+    if output_format == 'exr_aces2065':
+        return _ml_convert_exr(src, out_path, 'aces2065', weights_path, progress_cb)
 
     if torch.backends.mps.is_available():
         device = torch.device('mps')
