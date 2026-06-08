@@ -2,6 +2,26 @@ const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron')
 const path = require('path')
 const { spawn } = require('child_process')
 
+// ── Crash/Stability switches (must be set before app is ready) ──────────────
+// The real cause of the "Halfcab quit unexpectedly" dialog: a use-after-free
+// in Electron's macOS accessibility tree (objc_msgSend on freed memory),
+// triggered while running by the OS/assistive tools (e.g. screen recorders)
+// querying the app's a11y attributes — confirmed by the crash report.
+//   - disable-crashpad / disable-crash-reporter: stop the crash-handler
+//     subprocess whose exit produces the macOS dialog.
+//   - disable-gpu-sandbox / no-sandbox: avoid GPU/Metal process crashes
+//     common with Electron + Metal on macOS.
+// (Same mitigations used in the working Z-BOY app.)
+app.commandLine.appendSwitch('disable-crashpad')
+app.commandLine.appendSwitch('disable-crash-reporter')
+app.commandLine.appendSwitch('disable-gpu-sandbox')
+app.commandLine.appendSwitch('no-sandbox')
+
+// Single-instance lock — prevents duplicate processes (a crash trigger).
+if (!app.requestSingleInstanceLock()) {
+  app.quit()
+}
+
 const isDev = process.env.NODE_ENV === 'development'
 let mainWindow
 let backendProcess
