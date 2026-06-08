@@ -24,6 +24,27 @@ const PRESETS = [
 
 const NITS = [400, 1000, 2000, 4000]
 
+// Short "what you get / where it goes" guidance per ML mode — fills the panel
+// and tells you the next step.
+const MODE_INFO = {
+  graded: {
+    out: 'Rec.2020 12-bit ProRes (.mov)',
+    use: 'Drop into a Rec.2020 sequence in Premiere or Resolve. Cleanly exposed, gradeable, no banding.',
+  },
+  exr: {
+    out: 'Linear EXR sequence · Rec.709',
+    use: 'Import the sequence into After Effects with the comp set to 32 bpc. Overbright values preserved.',
+  },
+  exr_acescg: {
+    out: 'Linear EXR sequence · ACEScg (AP1)',
+    use: 'Import into a Nuke or DaVinci Resolve ACES project — it auto-reads the color space.',
+  },
+  exr_aces2065: {
+    out: 'Linear EXR sequence · ACES2065-1 (AP0)',
+    use: 'ACES interchange / archival master for moving between facilities.',
+  },
+}
+
 export default function PresetPanel({
   preset, onPreset,
   peakNits, onPeakNits,
@@ -110,6 +131,17 @@ export default function PresetPanel({
           <span className={styles.outputBrowse}>Browse</span>
         </div>
       </div>
+
+      {/* Guidance card for ML modes — fills the panel + explains the output */}
+      {!isV1 && MODE_INFO[mode] && (
+        <div className={styles.section}>
+          <div className={styles.sectionLabel}>OUTPUT</div>
+          <div className={styles.infoOut}>{MODE_INFO[mode].out}</div>
+          <div className={styles.infoUse}>{MODE_INFO[mode].use}</div>
+        </div>
+      )}
+
+      <div className={styles.spacer} />
 
     </div>
   )

@@ -142,3 +142,25 @@
 .outputRow:hover { border-color: var(--accent-lo); }
 .outputPath { font-size: 11px; font-family: var(--mono); color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
 .outputBrowse { font-size: 11px; color: var(--accent); flex-shrink: 0; margin-left: 8px; }
+
+/* ML-mode output guidance card */
+.infoOut {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent-hi);
+  font-family: var(--mono);
+  margin-bottom: 6px;
+}
+.infoUse {
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+
+/* Fills any remaining column space so panels sit at the top, no dead gap
+   with the raised background showing through. */
+.spacer {
+  flex: 1;
+  background: var(--bg-panel);
+  min-height: 0;
+}
