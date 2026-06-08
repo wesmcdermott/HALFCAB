@@ -1,17 +1,19 @@
 import React from 'react'
 import styles from './ModePanel.module.css'
 
+// Every mode except Original uses the GMNet ML gain-map reconstruction;
+// they differ only in the output format/color space (shown in `fmt`).
 const MODES = [
-  { id: 'v1',           label: 'Original',      tag: 'CURVES',
-    desc: 'FFmpeg curve tone-map. Fast, no ML. Expands existing values.' },
-  { id: 'graded',       label: 'HDR Graded',    tag: 'ML ✦',
-    desc: 'Neural HDR reconstruction → filmic shoulder. Clean gradeable master, no banding.' },
-  { id: 'exr',          label: 'EXR · Rec.709', tag: 'LINEAR',
-    desc: 'Scene-linear EXR sequence, Rec.709 primaries. After Effects 32bpc.' },
-  { id: 'exr_acescg',   label: 'EXR · ACEScg',  tag: 'ACES',
-    desc: 'Scene-linear EXR, AP1 working space. Nuke / Resolve ACES.' },
-  { id: 'exr_aces2065', label: 'EXR · ACES2065-1', tag: 'ACES',
-    desc: 'Scene-linear EXR, AP0 compliant container. Interchange / archival.' },
+  { id: 'v1',           label: 'Original',         ml: false, fmt: 'CURVES',
+    desc: 'FFmpeg curve tone-map. Fast, no ML — expands existing values.' },
+  { id: 'graded',       label: 'HDR Graded',       ml: true,  fmt: 'ProRes',
+    desc: 'ML HDR reconstruction → filmic shoulder. Clean gradeable Rec.2020 master, no banding.' },
+  { id: 'exr',          label: 'EXR · Rec.709',    ml: true,  fmt: 'EXR',
+    desc: 'ML reconstruction → scene-linear EXR, Rec.709 primaries. After Effects 32bpc.' },
+  { id: 'exr_acescg',   label: 'EXR · ACEScg',     ml: true,  fmt: 'EXR',
+    desc: 'ML reconstruction → scene-linear EXR, ACEScg/AP1. Nuke / Resolve ACES.' },
+  { id: 'exr_aces2065', label: 'EXR · ACES2065-1', ml: true,  fmt: 'EXR',
+    desc: 'ML reconstruction → scene-linear EXR, ACES2065-1/AP0 container. Interchange / archival.' },
 ]
 
 export default function ModePanel({ mode, onMode }) {
@@ -27,7 +29,10 @@ export default function ModePanel({ mode, onMode }) {
             onClick={() => onMode(m.id)}
           >
             <span className={styles.modeLabel}>{m.label}</span>
-            <span className={`${styles.tag} ${m.id === 'graded' ? styles.tagMl : ''}`}>{m.tag}</span>
+            <span className={styles.tags}>
+              {m.ml && <span className={`${styles.tag} ${styles.tagMl}`}>ML</span>}
+              <span className={styles.tag}>{m.fmt}</span>
+            </span>
           </button>
         ))}
       </div>

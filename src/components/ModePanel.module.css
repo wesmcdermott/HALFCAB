@@ -65,3 +65,5 @@
   line-height: 1.4;
   min-height: 28px;
 }
+
+.tags { display: flex; gap: 4px; align-items: center; }
