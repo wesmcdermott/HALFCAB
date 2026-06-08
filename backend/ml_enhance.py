@@ -174,24 +174,27 @@ def hdr_linear_to_hlg(hdr_lin_709):
 
 def hdr_linear_to_graded(hdr_lin_709, knee=0.80, gamma=2.4):
     """
-    Convert scene-linear Rec.709 HDR → a CLEANLY-EXPOSED Rec.709 video
-    signal [0,1] with a smooth highlight shoulder — no clamping, no banding,
-    headroom for grading.
+    Convert scene-linear Rec.709 HDR → a CLEANLY-EXPOSED Rec.2020 video
+    signal [0,1] with a smooth highlight shoulder — HDR-informed exposure,
+    headroom for grading, no banding (paired with bit-depth dither at encode).
 
-    Kept in Rec.709 primaries (NOT Rec.2020) so it behaves predictably in
-    ANY sequence — an HLG/2020 sequence would otherwise remap the white
-    point and crush the highlights to ~75 IRE. This is a clean gradeable
-    SDR-gamut master; the recovered highlight detail is its value.
+    Take the gain-map HDR (overbright >1.0) and roll it gracefully into the
+    [0,1] container:
+      - below `knee`: pass 1:1 (exposure preserved)
+      - above `knee`: the recovered overbright rolls into [knee,1] via a tanh
+        shoulder — graceful highlight falloff a colorist can pull back, not
+        a hard clip
 
-    Tone curve: values below `knee` pass 1:1 (exposure preserved), values
-    above (the overbright the gain map recovered) roll smoothly into the
-    [knee,1] headroom via a tanh shoulder — graceful falloff, not a clip.
+    Rec.709 → Rec.2020 primaries: besides the wider gamut, the 3×3 channel
+    mix averages per-channel 8-bit-origin steps, which smooths banding.
     """
-    x = np.clip(hdr_lin_709, 0, None)   # stay in Rec.709 linear
+    h, w, _ = hdr_lin_709.shape
+    r2020 = (hdr_lin_709.reshape(-1, 3) @ _R709_TO_R2020.T).reshape(h, w, 3)
+    r2020 = np.clip(r2020, 0, None)
     rolled = np.where(
-        x <= knee,
-        x,
-        knee + (1.0 - knee) * np.tanh((x - knee) / (1.0 - knee))
+        r2020 <= knee,
+        r2020,
+        knee + (1.0 - knee) * np.tanh((r2020 - knee) / (1.0 - knee))
     )
     rolled = np.clip(rolled, 0, 1)
     signal = np.power(rolled, 1.0 / gamma)   # gamma 2.4 encode
@@ -295,19 +298,19 @@ def _ml_convert_exr(src, out_dir, colorspace='rec709', weights_path=None, progre
 
 
 def ml_convert(src, out_path, peak_nits=1000, weights_path=None,
-               output_format='prores', progress_cb=None):
+               output_format='graded', progress_cb=None):
     """
     Full ML gain-map SDR→HDR conversion.
 
     output_format:
-      'prores'        → HLG Rec.2020 ProRes — true HDR video (Premiere/broadcast).
-                        HDR lives in the HLG curve; signal is [0,1].
-      'graded'        → Rec.2020 ProRes with HDR-informed filmic shoulder.
-                        Cleanly exposed [0,1], smooth highlights, NO banding,
-                        headroom for grading. Uses the HDR reconstruction to
-                        improve exposure without forcing overbright.
-      'exr'           → scene-linear EXR, Rec.709 (After Effects 32bpc comp).
-      'exr_acescg'    → scene-linear EXR, ACEScg/AP1 (VFX/Nuke/Resolve ACES).
+      'graded'      → Rec.2020 12-bit ProRes. Reconstructs HDR (overbright)
+                      then rolls it into a clean [0,1] gradeable master with a
+                      filmic highlight shoulder. Bit-depth dither = no banding.
+                      Well-exposed, headroom for finishing.  (DEFAULT)
+      'exr'         → scene-linear EXR, Linear Rec.709   (After Effects 32bpc)
+      'exr_acescg'  → scene-linear EXR, ACEScg / AP1     (Nuke/Resolve ACES)
+
+    (HLG video output was removed — it banded on 8-bit AI source.)
     """
     import torch
     from PIL import Image
@@ -350,20 +353,20 @@ def ml_convert(src, out_path, peak_nits=1000, weights_path=None,
         total = len(frames)
         print(f'[ml_enhance] {total} frames', flush=True)
 
-        graded = (output_format == 'graded')
         for i, fp in enumerate(frames):
             rgb    = np.array(Image.open(fp).convert('RGB'), dtype=np.uint8)
             gain   = infer_gainmap(rgb, device, net)
             hdr    = sdr_to_hdr(rgb, gain, peak=model_peak)  # linear Rec.709 [0,12]
-            if graded:
-                signal = hdr_linear_to_graded(hdr)           # filmic shoulder, gamma 2.4
-            else:
-                signal = hdr_linear_to_hlg(hdr)              # HLG signal [0,1]
+            signal = hdr_linear_to_graded(hdr)               # HDR→graded, gamma 2.4
 
-            # Final TPDF dither at 16-bit quantisation. cv2 expects BGR uint16.
+            # TPDF dither sized to the OUTPUT bit depth, not 16-bit. The PNG
+            # is 16-bit but ProRes is 12-bit — dither must span ±1 12-bit LSB
+            # (=16 in 16-bit units) to break 12-bit quantisation banding.
+            # (16-bit dither of 0.5 was 32x too small → visible banding.)
+            lsb12 = 65535.0 / 4095.0   # ≈16.0
             tpdf = (np.random.random(signal.shape).astype(np.float32) -
                     np.random.random(signal.shape).astype(np.float32))
-            sig16 = np.clip(signal * 65535.0 + tpdf * 0.5, 0, 65535).astype(np.uint16)
+            sig16 = np.clip(signal * 65535.0 + tpdf * lsb12, 0, 65535).astype(np.uint16)
             cv2.imwrite(os.path.join(tmp, f'hlg_{i+1:06d}.png'), sig16[:, :, ::-1])
 
             if progress_cb:
@@ -372,13 +375,9 @@ def ml_convert(src, out_path, peak_nits=1000, weights_path=None,
         os.makedirs(os.path.dirname(out_path) or '.', exist_ok=True)
         print('[ml_enhance] encoding …', flush=True)
 
-        # graded mode: Rec.709 gamma-2.4 — predictable gradeable SDR-gamut
-        #              master, behaves correctly in ANY sequence (no remap crush)
-        # prores mode: Rec.2020 HLG — true HDR curve
-        if graded:
-            prim, trc, mtx = 'bt709', 'bt709', 'bt709'
-        else:
-            prim, trc, mtx = 'bt2020', 'arib-std-b67', 'bt2020nc'
+        # graded mode: Rec.2020 primaries, gamma-2.4 transfer — HDR-informed
+        #              gradeable master (use a Rec.2020 / gamma-2.4 sequence)
+        prim, trc, mtx = 'bt2020', 'bt709', 'bt2020nc'
         subprocess.run([
             FFMPEG, '-y',
             '-framerate', str(fps),

@@ -1,5 +1,11 @@
 flask
 flask-cors
-numpy
+# numpy 1.26 silently corrupts array ops inside function frames on Python 3.14
+# (intermittent heap corruption — np.where returned garbage on large arrays).
+# 2.1+ is required for Python 3.14 compatibility.
+numpy>=2.1
+pillow
+opencv-python
+OpenImageIO
+torch
 colour-science
-matplotlib
