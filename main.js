@@ -63,19 +63,30 @@ app.whenReady().then(() => {
   setTimeout(createWindow, 900)
 })
 
-// Handle ⌘Q and File > Quit — this fires before windows close
-app.on('before-quit', () => {
+// Quit handling. There is a known Electron+macOS bug where the AppKit
+// accessibility system queries the app's UI tree during the normal Cocoa
+// teardown and dereferences a freed object → SIGSEGV ("quit unexpectedly").
+// We sidestep it: kill the backend, then hard-exit with app.exit(0), which
+// terminates the process immediately and never enters the buggy teardown path.
+let hardExiting = false
+function hardQuit() {
+  if (hardExiting) return
+  hardExiting = true
   isQuitting = true
   killBackend()
+  // Give SIGTERM a moment to reach the Python child, then exit hard.
+  setTimeout(() => app.exit(0), 150)
+}
+
+app.on('before-quit', (e) => {
+  if (!hardExiting) {
+    e.preventDefault()   // stop the normal (crash-prone) quit
+    hardQuit()
+  }
 })
 
-// macOS: closing all windows doesn't quit the app
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    isQuitting = true
-    killBackend()
-    app.quit()
-  }
+  hardQuit()             // closing the window quits the app (and cleanly)
 })
 
 app.on('activate', () => {
