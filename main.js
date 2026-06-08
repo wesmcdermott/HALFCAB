@@ -16,6 +16,9 @@ app.commandLine.appendSwitch('disable-crashpad')
 app.commandLine.appendSwitch('disable-crash-reporter')
 app.commandLine.appendSwitch('disable-gpu-sandbox')
 app.commandLine.appendSwitch('no-sandbox')
+// Lets the file:// app page load the user's file:// video without disabling
+// web security wholesale (replaces the removed webSecurity:false).
+app.commandLine.appendSwitch('allow-file-access-from-files')
 
 // Single-instance lock — prevents duplicate processes (a crash trigger).
 if (!app.requestSingleInstanceLock()) {
@@ -68,7 +71,11 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      webSecurity: false,
+      // webSecurity:true to match the working Z-BOY/Kickflip apps — the only
+      // config that differed. The video player loads file:// paths; we keep
+      // that working with the targeted --allow-file-access-from-files switch
+      // (set below) instead of disabling web security wholesale.
+      webSecurity: true,
     }
   })
   if (isDev) {
