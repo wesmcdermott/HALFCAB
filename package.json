@@ -20,10 +20,12 @@
       "main.js",
       "preload.js",
       "backend/**/*",
+      "ml_models/GMNet/codes/**/*",
+      "ml_models/GMNet/checkpoints/**/*",
       "!node_modules/**/*"
     ],
     "asar": true,
-    "asarUnpack": ["backend/**/*"],
+    "asarUnpack": ["backend/**/*", "ml_models/**/*"],
     "mac": {
       "icon": "build/halfcab.icns",
       "category": "public.app-category.video",
