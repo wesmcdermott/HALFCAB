@@ -174,36 +174,27 @@ def hdr_linear_to_hlg(hdr_lin_709):
 
 def hdr_linear_to_graded(hdr_lin_709, knee=0.80, gamma=2.4):
     """
-    Convert scene-linear Rec.709 HDR → a CLEANLY-EXPOSED Rec.2020 video
-    signal [0,1] with a smooth highlight shoulder — no clamping, no banding.
+    Convert scene-linear Rec.709 HDR → a CLEANLY-EXPOSED Rec.709 video
+    signal [0,1] with a smooth highlight shoulder — no clamping, no banding,
+    headroom for grading.
 
-    Instead of forcing overbright into a curve that then crushes (banding),
-    we use the HDR reconstruction to inform a filmic roll-off:
-      - values below `knee` (well-exposed midtones/shadows) pass through 1:1,
-        preserving exposure
-      - values above `knee` (the overbright the gain map recovered) roll
-        smoothly into the remaining [knee,1] headroom via a tanh shoulder,
-        asymptotic to 1.0 — so the lamp's recovered detail becomes a graceful
-        falloff a colorist can pull back, not a hard clip
+    Kept in Rec.709 primaries (NOT Rec.2020) so it behaves predictably in
+    ANY sequence — an HLG/2020 sequence would otherwise remap the white
+    point and crush the highlights to ~75 IRE. This is a clean gradeable
+    SDR-gamut master; the recovered highlight detail is its value.
 
-    Result: 12-bit Rec.2020, full tonal detail, smooth gradients, grade-ready.
+    Tone curve: values below `knee` pass 1:1 (exposure preserved), values
+    above (the overbright the gain map recovered) roll smoothly into the
+    [knee,1] headroom via a tanh shoulder — graceful falloff, not a clip.
     """
-    h, w, _ = hdr_lin_709.shape
-    # Gamut: Rec.709 → Rec.2020 (linear)
-    r2020 = (hdr_lin_709.reshape(-1, 3) @ _R709_TO_R2020.T).reshape(h, w, 3)
-    r2020 = np.clip(r2020, 0, None)
-
-    # Filmic shoulder on linear light: identity below knee, tanh roll above
-    x = r2020
+    x = np.clip(hdr_lin_709, 0, None)   # stay in Rec.709 linear
     rolled = np.where(
         x <= knee,
         x,
         knee + (1.0 - knee) * np.tanh((x - knee) / (1.0 - knee))
     )
     rolled = np.clip(rolled, 0, 1)
-
-    # Encode to gamma 2.4 (Rec.2020 SDR-range transfer) for the 12-bit container
-    signal = np.power(rolled, 1.0 / gamma)
+    signal = np.power(rolled, 1.0 / gamma)   # gamma 2.4 encode
     return signal.astype(np.float32)
 
 
@@ -270,15 +261,32 @@ def _ml_convert_exr(src, out_dir, colorspace='rec709', weights_path=None, progre
         total = len(frames)
         print(f'[ml_enhance] {total} frames → EXR ({colorspace})', flush=True)
 
+        import OpenImageIO as oiio
+        # Chromaticities tags (R x,y  G x,y  B x,y  W x,y) so Nuke/Resolve/AE
+        # read the correct primaries instead of assuming sRGB.
+        CHROMA = {
+            'rec709': (0.640, 0.330, 0.300, 0.600, 0.150, 0.060, 0.3127, 0.3290),
+            'acescg': (0.713, 0.293, 0.165, 0.830, 0.128, 0.044, 0.32168, 0.33767),
+        }[colorspace]
+
         for i, fp in enumerate(frames):
             rgb  = np.array(Image.open(fp).convert('RGB'), dtype=np.uint8)
             gain = infer_gainmap(rgb, device, net)
             hdr  = sdr_to_hdr(rgb, gain, peak=8.0)        # scene-linear Rec.709 [0,12]
             if colorspace == 'acescg':
                 hdr = hdr_linear_to_acescg(hdr)            # → AP1 primaries
-            # cv2 writes BGR float EXR; overbright >1.0 preserved
-            cv2.imwrite(os.path.join(seq_dir, f'{base}_{i+1:06d}.exr'),
-                        hdr[:, :, ::-1].astype(np.float32))
+
+            # Write tagged float EXR via OpenImageIO (chromaticities embedded)
+            spec = oiio.ImageSpec(hdr.shape[1], hdr.shape[0], 3, 'float')
+            spec.attribute('chromaticities', 'float[8]', CHROMA)
+            spec.attribute('compression', 'zip')
+            spec.attribute('oiio:ColorSpace',
+                           'ACEScg' if colorspace == 'acescg' else 'Linear Rec.709')
+            ibuf = oiio.ImageBuf(spec)
+            ibuf.set_pixels(oiio.ROI(0, hdr.shape[1], 0, hdr.shape[0], 0, 1, 0, 3),
+                            np.ascontiguousarray(hdr, dtype=np.float32))
+            ibuf.write(os.path.join(seq_dir, f'{base}_{i+1:06d}.exr'))
+
             if progress_cb:
                 progress_cb(i + 1, total)
 
@@ -364,19 +372,22 @@ def ml_convert(src, out_path, peak_nits=1000, weights_path=None,
         os.makedirs(os.path.dirname(out_path) or '.', exist_ok=True)
         print('[ml_enhance] encoding …', flush=True)
 
-        # graded mode: Rec.2020 gamma-2.4 (SDR-range transfer, gradeable)
-        # prores mode: Rec.2020 HLG (true HDR curve)
-        trc = 'bt709' if graded else 'arib-std-b67'
+        # graded mode: Rec.709 gamma-2.4 — predictable gradeable SDR-gamut
+        #              master, behaves correctly in ANY sequence (no remap crush)
+        # prores mode: Rec.2020 HLG — true HDR curve
+        if graded:
+            prim, trc, mtx = 'bt709', 'bt709', 'bt709'
+        else:
+            prim, trc, mtx = 'bt2020', 'arib-std-b67', 'bt2020nc'
         subprocess.run([
             FFMPEG, '-y',
             '-framerate', str(fps),
             '-i', out_pat,
             '-i', src, '-map', '0:v', '-map', '1:a?',
-            '-vf', f'setparams=color_primaries=bt2020:color_trc={trc}:'
-                   f'colorspace=bt2020nc,format=yuv444p12le',
+            '-vf', f'setparams=color_primaries={prim}:color_trc={trc}:'
+                   f'colorspace={mtx},format=yuv444p12le',
             '-c:v', 'prores_ks', '-profile:v', '4444', '-pix_fmt', 'yuva444p12le',
-            '-color_primaries', 'bt2020', '-color_trc', trc,
-            '-colorspace', 'bt2020nc',
+            '-color_primaries', prim, '-color_trc', trc, '-colorspace', mtx,
             '-c:a', 'copy', out_path,
         ], check=True, capture_output=True)
 
