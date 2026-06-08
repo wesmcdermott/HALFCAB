@@ -25,23 +25,73 @@ if (!app.requestSingleInstanceLock()) {
   app.quit()
 }
 
+const fs = require('fs')
+const { execSync } = require('child_process')
+
 const isDev = process.env.NODE_ENV === 'development'
 let mainWindow
 let backendProcess
 let isQuitting = false
+
+// A Finder-launched .app gets a minimal PATH (/usr/bin:/bin:…) — NOT the
+// user's shell PATH. So bare `python3` resolves to /usr/bin/python3 (no
+// flask/numpy/torch) and `ffmpeg`/`ffprobe` aren't found at all. We must:
+//   1. find a Python interpreter that actually has the backend's deps
+//   2. run the backend with a PATH that includes Homebrew etc. so ffmpeg works
+const EXTRA_PATHS = [
+  '/opt/homebrew/bin', '/usr/local/bin',
+  '/Library/Frameworks/Python.framework/Versions/3.14/bin',
+  '/Library/Frameworks/Python.framework/Versions/3.13/bin',
+  '/Library/Frameworks/Python.framework/Versions/3.12/bin',
+]
+
+function fullEnvPath() {
+  // Merge known tool dirs with the user's real login-shell PATH (best effort).
+  let shellPath = ''
+  try {
+    shellPath = execSync(`${process.env.SHELL || '/bin/zsh'} -lc 'echo -n $PATH'`,
+                         { timeout: 4000 }).toString()
+  } catch (_) {}
+  return [...EXTRA_PATHS, shellPath, process.env.PATH || ''].filter(Boolean).join(':')
+}
+
+function findPython(envPath) {
+  // Candidate interpreters, then anything on the merged PATH.
+  const candidates = [
+    '/Library/Frameworks/Python.framework/Versions/3.14/bin/python3',
+    '/Library/Frameworks/Python.framework/Versions/3.13/bin/python3',
+    '/opt/homebrew/bin/python3', '/usr/local/bin/python3',
+  ]
+  try {
+    const w = execSync(`${process.env.SHELL || '/bin/zsh'} -lc 'command -v python3'`,
+                       { timeout: 4000 }).toString().trim()
+    if (w) candidates.push(w)
+  } catch (_) {}
+  for (const py of candidates) {
+    if (!py || !fs.existsSync(py)) continue
+    try {
+      execSync(`"${py}" -c "import flask, numpy"`, { timeout: 8000, env: { ...process.env, PATH: envPath } })
+      return py   // first interpreter that has the deps
+    } catch (_) {}
+  }
+  return 'python3'  // last resort
+}
 
 function startBackend() {
   const backendPath = isDev
     ? path.join(__dirname, 'backend', 'server.py')
     : path.join(process.resourcesPath, 'app.asar.unpacked', 'backend', 'server.py')
 
-  backendProcess = spawn('python3', [backendPath], {
-    env: { ...process.env, PYTHONUNBUFFERED: '1' }
+  const envPath = fullEnvPath()
+  const python  = findPython(envPath)
+  console.log('[backend] interpreter:', python)
+
+  backendProcess = spawn(python, [backendPath], {
+    env: { ...process.env, PATH: envPath, PYTHONUNBUFFERED: '1' }
   })
   backendProcess.stdout.on('data', d => console.log('[backend]', d.toString()))
   backendProcess.stderr.on('data', d => console.error('[backend]', d.toString()))
 
-  // Don't treat backend exit as a crash if we're already quitting
   backendProcess.on('exit', (code) => {
     if (!isQuitting) console.warn('[backend] exited unexpectedly with code', code)
   })
