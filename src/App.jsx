@@ -2,6 +2,7 @@ import React, { useState, useCallback } from 'react'
 import Titlebar from './components/Titlebar.jsx'
 import DropZone from './components/DropZone.jsx'
 import FileQueue from './components/FileQueue.jsx'
+import ModePanel from './components/ModePanel.jsx'
 import PresetPanel from './components/PresetPanel.jsx'
 import AnalyzePanel from './components/AnalyzePanel.jsx'
 import ScopesPanel from './components/ScopesPanel.jsx'
@@ -17,8 +18,8 @@ export default function App() {
   const [toneStrength, setToneStr]  = useState(85)
   const [outputDir, setOutputDir]   = useState('')
   const [converting, setConverting] = useState(false)
-  const [mlMode, setMlMode]         = useState(false)   // v2 ML enhance toggle
-  const [mlJobs, setMlJobs]         = useState({})      // jobId → progress
+  // Conversion mode: 'v1' | 'graded' | 'exr' | 'exr_acescg' | 'exr_aces2065'
+  const [mode, setMode]             = useState('graded')
   const [activeFile, setActiveFile] = useState(null)   // file path for scopes preview
   const [scopeMode, setScopeMode]   = useState('waveform')
 
@@ -47,78 +48,60 @@ export default function App() {
     if (dir) setOutputDir(dir)
   }
 
+  const setFile = (path, patch) =>
+    setFiles(prev => prev.map(f => f.path === path ? { ...f, ...patch } : f))
+
+  // v1: fast FFmpeg curves tone-map (no ML). Synchronous /convert.
+  const runV1 = async (file) => {
+    const data = await fetch(`${API}/convert`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        input: file.path, preset, peak_nits: peakNits,
+        tone_strength: toneStrength / 100, output_dir: outputDir || null,
+      })
+    }).then(r => r.json())
+    if (!data.ok) throw new Error(data.error)
+    return data.output
+  }
+
+  // v2: ML gain-map (graded / exr / exr_acescg / exr_aces2065). Async + polling.
+  const runML = async (file, outputFormat) => {
+    const res = await fetch(`${API}/ml-convert`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        input: file.path, peak_nits: peakNits,
+        output_format: outputFormat, output_dir: outputDir || null,
+      })
+    }).then(r => r.json())
+    if (!res.ok) throw new Error(res.error)
+    return await new Promise((resolve, reject) => {
+      const poll = setInterval(async () => {
+        const p = await fetch(`${API}/ml-progress/${res.job_id}`).then(r => r.json())
+        setFile(file.path, { mlProgress: p.total > 0 ? `Frame ${p.done}/${p.total}` : p.status })
+        if (p.status === 'done')  { clearInterval(poll); resolve(p.output) }
+        if (p.status === 'error') { clearInterval(poll); reject(new Error(p.error)) }
+      }, 800)
+    })
+  }
+
   const convertAll = async () => {
     const pending = files.filter(f => f.status === 'idle' || f.status === 'error')
     if (!pending.length) return
     setConverting(true)
-
     for (const file of pending) {
-      setFiles(prev => prev.map(f => f.path === file.path ? { ...f, status: 'converting', progress: 0 } : f))
+      setFile(file.path, { status: 'converting', progress: 0, mlProgress: mode === 'v1' ? null : 'Starting…' })
       try {
-        const res = await fetch(`${API}/convert`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            input: file.path,
-            preset,
-            peak_nits: peakNits,
-            tone_strength: toneStrength / 100,
-            output_dir: outputDir || null,
-          })
-        })
-        const data = await res.json()
-        if (data.ok) {
-          setFiles(prev => prev.map(f => f.path === file.path ? { ...f, status: 'done', output: data.output, progress: 100 } : f))
-        } else {
-          setFiles(prev => prev.map(f => f.path === file.path ? { ...f, status: 'error', error: data.error } : f))
-        }
+        const output = mode === 'v1' ? await runV1(file) : await runML(file, mode)
+        setFile(file.path, { status: 'done', output, progress: 100 })
       } catch (e) {
-        setFiles(prev => prev.map(f => f.path === file.path ? { ...f, status: 'error', error: e.message } : f))
+        setFile(file.path, { status: 'error', error: String(e.message).slice(0, 200) })
       }
     }
     setConverting(false)
   }
 
-  const resetDone = () => {
+  const resetDone = () =>
     setFiles(prev => prev.map(f => f.status === 'done' ? { ...f, status: 'idle', output: null } : f))
-  }
-
-  // ── ML convert (v2) ──────────────────────────────────────────────────────
-  const mlConvertAll = async () => {
-    const pending = files.filter(f => f.status === 'idle' || f.status === 'error')
-    if (!pending.length) return
-    setConverting(true)
-
-    for (const file of pending) {
-      setFiles(prev => prev.map(f => f.path === file.path ? { ...f, status: 'converting', progress: 0, mlProgress: 'Starting ML…' } : f))
-      try {
-        const res = await fetch(`${API}/ml-convert`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ input: file.path, peak_nits: peakNits, output_dir: outputDir || null })
-        }).then(r => r.json())
-
-        if (!res.ok) throw new Error(res.error)
-        const jobId = res.job_id
-
-        // Poll until done
-        await new Promise((resolve, reject) => {
-          const poll = setInterval(async () => {
-            const p = await fetch(`${API}/ml-progress/${jobId}`).then(r => r.json())
-            const label = p.total > 0 ? `Frame ${p.done}/${p.total}` : p.status
-            setFiles(prev => prev.map(f => f.path === file.path ? { ...f, mlProgress: label } : f))
-            if (p.status === 'done') { clearInterval(poll); resolve(p.output) }
-            if (p.status === 'error') { clearInterval(poll); reject(new Error(p.error)) }
-          }, 800)
-        }).then(output => {
-          setFiles(prev => prev.map(f => f.path === file.path ? { ...f, status: 'done', output } : f))
-        })
-      } catch (e) {
-        setFiles(prev => prev.map(f => f.path === file.path ? { ...f, status: 'error', error: e.message.slice(0, 200) } : f))
-      }
-    }
-    setConverting(false)
-  }
 
   return (
     <div className={styles.root}>
@@ -135,11 +118,13 @@ export default function App() {
             onSelect={setActiveFile}
             onRemove={removeFile}
           />
+          <ModePanel mode={mode} onMode={setMode} />
           <PresetPanel
             preset={preset}           onPreset={setPreset}
             peakNits={peakNits}       onPeakNits={setPeakNits}
             toneStrength={toneStrength} onToneStr={setToneStr}
             outputDir={outputDir}     onPickOutput={pickOutput}
+            mode={mode}
           />
           <AnalyzePanel
             filePath={activeFile}
@@ -149,13 +134,12 @@ export default function App() {
             }}
           />
           <ConvertButton
-            onClick={mlMode ? mlConvertAll : convertAll}
+            onClick={convertAll}
             converting={converting}
             count={files.filter(f => f.status === 'idle' || f.status === 'error').length}
             doneCount={files.filter(f => f.status === 'done').length}
             onReset={resetDone}
-            mlMode={mlMode}
-            onMlMode={setMlMode}
+            mode={mode}
             mlProgress={files.find(f => f.status === 'converting')?.mlProgress}
           />
         </div>
