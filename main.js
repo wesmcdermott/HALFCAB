@@ -26,14 +26,14 @@ function startBackend() {
 
 function killBackend() {
   if (!backendProcess) return
-  try {
-    backendProcess.kill('SIGTERM')
-    // Give it 500ms to die gracefully, then force kill
-    setTimeout(() => {
-      try { backendProcess.kill('SIGKILL') } catch (_) {}
-    }, 500)
-  } catch (_) {}
+  const proc = backendProcess          // keep a local ref so the timeout works
   backendProcess = null
+  try {
+    proc.kill('SIGTERM')               // server.py handles this → clean exit(0)
+    // Fallback force-kill if it didn't exit (uses the captured ref, not the
+    // now-nulled global — the previous bug meant SIGKILL never actually fired)
+    setTimeout(() => { try { proc.kill('SIGKILL') } catch (_) {} }, 800)
+  } catch (_) {}
 }
 
 function createWindow() {

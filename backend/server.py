@@ -1,10 +1,19 @@
-import os, json, base64, subprocess, io, math, sys
+import os, json, base64, subprocess, io, math, sys, signal
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import numpy as np
 
 app = Flask(__name__)
 CORS(app)
+
+# Exit immediately and cleanly (code 0) when Electron sends SIGTERM/SIGINT on
+# quit. os._exit skips interpreter teardown — PyTorch/MPS destructors can throw
+# or hang during normal shutdown, and that abnormal exit is what triggers
+# macOS's "Halfcab quit unexpectedly" dialog. A clean 0 exit avoids it.
+def _shutdown(*_):
+    os._exit(0)
+signal.signal(signal.SIGTERM, _shutdown)
+signal.signal(signal.SIGINT, _shutdown)
 
 FFMPEG  = 'ffmpeg'
 FFPROBE = 'ffprobe'
