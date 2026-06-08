@@ -44,6 +44,29 @@ Right-click → Open → Open to bypass.
 
 ---
 
+## How to Use
+
+1. **Load** — drag a clip onto the drop zone (or click to browse); click it in the queue to select.
+2. **Analyze** (optional) — **⬡ Analyze Video** scans 8 frames and suggests settings.
+3. **Pick a mode** — see table below.
+4. **Peak Brightness** — **1000 nits** for most delivery.
+5. **Convert** — Original is instant; HDR Graded / EXR run frame-by-frame.
+
+| Mode | Use when… |
+|---|---|
+| **Original** | Fast, predictable expand (no ML) |
+| **HDR Graded** | Finished gradeable Rec.2020 master, no banding — *best default* |
+| **EXR · Rec.709** | After Effects compositing (32 bpc) |
+| **EXR · ACEScg** | Nuke / Resolve ACES working space |
+| **EXR · ACES2065-1** | ACES interchange / archival |
+
+**Where it goes:** HDR Graded → a **Rec.2020** sequence (not HLG, which remaps it).
+EXR → import as a sequence; ACES variants auto-read their color space in Nuke/Resolve.
+
+See [QUICKSTART.md](QUICKSTART.md) for the full guide, scope reading, and notes.
+
+---
+
 ## Development
 
 ```bash
