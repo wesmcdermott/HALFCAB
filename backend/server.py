@@ -183,9 +183,13 @@ def make_waveform(src, time_s, lift=''):
 
             density = np.zeros((PLOT_H, PLOT_W), dtype=np.float32)
             np.add.at(density, (ch_y.ravel(), x_idx.ravel()), 1.0)   # count pixels
-            mx = density.max()
-            if mx > 0:
-                d_norm = np.sqrt(density / mx)                       # 0-1, density-based
+            nz = density[density > 0]
+            if nz.size:
+                # Normalise against a typical (90th pct) bin, not the single
+                # densest one, so the whole trace reads brightly. Power <1
+                # lifts sparse areas; gain pushes it toward full strength.
+                ref = max(np.percentile(nz, 90), 1.0)
+                d_norm = np.clip(np.power(density / ref, 0.4) * 1.6, 0, 1)
             else:
                 d_norm = density
             canvas[:,:,0] = np.clip(canvas[:,:,0] + d_norm * cr, 0, 255)
