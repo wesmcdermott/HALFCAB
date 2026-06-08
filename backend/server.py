@@ -172,26 +172,25 @@ def make_waveform(src, time_s, lift=''):
         # Mapping: SDR value → HLG position = value/255 × 0.75 × PLOT_H
         # This makes the waveform match what Premiere shows after conversion.
         HLG_SCALE = 0.75   # SDR white lands at 75% of the HLG scale
-        ch_colors = [(0,(220,0,0)),(1,(0,200,0)),(2,(0,0,220))]
-        # Each source pixel contributes its own value as colored light.
-        # R pixels → red glow at R's Y position
-        # G pixels → green glow at G's Y position
-        # B pixels → blue glow at B's Y position
-        # Overlapping channels mix naturally (R+G=yellow, R+B=magenta, G+B=cyan)
-        scale = 4.0 / th   # scale so full column = 255
-
+        ch_colors = [(0,(255,40,40)),(1,(40,255,60)),(2,(60,90,255))]
+        # Each pixel plots a point at its value's Y position (R/G/B in colour;
+        # channels mix where they overlap). Trace brightness = pixel DENSITY at
+        # that position (count), NOT the pixel's own value — otherwise dark
+        # scenes render nearly invisible. sqrt makes sparse traces readable.
         for ch,(cr,cg,cb) in ch_colors:
             ch_val = cols[:,:,ch].astype(np.float32)               # th × PLOT_W
             ch_y   = np.clip((PLOT_H-1 - ch_val*(PLOT_H-1)*HLG_SCALE/255).astype(int), 0, PLOT_H-1)
-            v_norm = ch_val / 255.0                                # 0-1, actual brightness
 
-            accum = np.zeros((PLOT_H, PLOT_W), dtype=np.float32)
-            np.add.at(accum, (ch_y.ravel(), x_idx.ravel()), v_norm.ravel())
-            accum = np.clip(accum * scale * 255, 0, 255)
-
-            if cr: canvas[:,:,0] = np.clip(canvas[:,:,0] + accum * (cr/255), 0, 255)
-            if cg: canvas[:,:,1] = np.clip(canvas[:,:,1] + accum * (cg/255), 0, 255)
-            if cb: canvas[:,:,2] = np.clip(canvas[:,:,2] + accum * (cb/255), 0, 255)
+            density = np.zeros((PLOT_H, PLOT_W), dtype=np.float32)
+            np.add.at(density, (ch_y.ravel(), x_idx.ravel()), 1.0)   # count pixels
+            mx = density.max()
+            if mx > 0:
+                d_norm = np.sqrt(density / mx)                       # 0-1, density-based
+            else:
+                d_norm = density
+            canvas[:,:,0] = np.clip(canvas[:,:,0] + d_norm * cr, 0, 255)
+            canvas[:,:,1] = np.clip(canvas[:,:,1] + d_norm * cg, 0, 255)
+            canvas[:,:,2] = np.clip(canvas[:,:,2] + d_norm * cb, 0, 255)
 
         canvas = np.clip(canvas, 0, 255).astype(np.uint8)
         # Gentle vertical blur — smooths individual pixel scatter like Premiere
