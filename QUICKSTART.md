@@ -15,7 +15,7 @@ Convert AI-generated video (8-bit SDR) into professional HDR / wide-gamut delive
 3. **Pick a mode** (see table below).
 4. **Peak Brightness** — use **1000 nits** for most delivery. (4000 only for high-end HDR mastering.)
 5. **Output folder** (optional) — Browse to choose; defaults next to the source.
-6. **Convert** — Original is instant; HDR Graded / EXR run frame-by-frame (~3–4 min for a short clip; shows `Frame 45/193`).
+6. **Convert** — Curve Expand is instant; HDR Graded / EXR run frame-by-frame (~3–4 min for a short clip; shows `Frame 45/193`).
 
 ---
 
@@ -23,7 +23,7 @@ Convert AI-generated video (8-bit SDR) into professional HDR / wide-gamut delive
 
 | Mode | Use when… | Output |
 |---|---|---|
-| **Original** | Fast, predictable expand — no ML | Rec.2020 ProRes (curve-lifted) |
+| **Curve Expand** | Fast, predictable expand — no ML | Rec.2020 ProRes (curve-lifted) |
 | **HDR Graded** ✦ | Finished gradeable master, no banding — **best default for delivery** | Rec.2020 12-bit ProRes |
 | **EXR · Rec.709** | Compositing in **After Effects** | Linear EXR sequence (Rec.709) |
 | **EXR · ACEScg** | Grading/comp in **Nuke / DaVinci Resolve** (ACES) | Linear EXR sequence (AP1) |
@@ -32,6 +32,51 @@ Convert AI-generated video (8-bit SDR) into professional HDR / wide-gamut delive
 **Recommendations:**
 - AI video → professional delivery: **HDR Graded · 1000 nits**
 - VFX/compositing with real overbright: **EXR ACEScg · 1000 nits**
+
+---
+
+## Conversion Modes Explained
+
+### Curve Expand
+The original FFmpeg curve-based conversion — the one mode that does **not** use
+ML. It applies a fixed tone curve to stretch your existing 8-bit values into a
+wider 10/12-bit container and target color space (driven by the preset + Tone
+Map slider). It does **not** reconstruct or recover any detail; it just remaps
+the values that are already there, so blown-out areas stay blown out, just
+rescaled. Fast, no GPU, fully deterministic. Use it for a quick test or when you
+want a predictable mathematical curve with no ML interpretation. It's the only
+mode with a `CURVES` badge instead of `ML`.
+
+### HDR Graded + the EXR modes (all ML)
+These four share one engine: the **GMNet machine-learning gain-map
+reconstruction**. The model looks at each frame and predicts a per-pixel gain
+map, recovering the highlight/specular energy the 8-bit source clipped (a flat
+blown-out lamp gets pushed back to ~2.5× brightness). That produces a
+scene-linear HDR image with genuine overbright values above 1.0. They differ
+only in what they output:
+
+**HDR Graded (ProRes)** — the *finished master* path. Rolls the reconstructed
+HDR into a 10/12-bit video container: Rec.709→Rec.2020 gamut, a filmic highlight
+shoulder (highlights land ~90% with headroom above), the bt709 transfer it's
+tagged with, and 12-bit dither for no banding. Output is a clean, gradeable
+**Rec.2020 ProRes 4444 .mov**. Because it's *video*, it can't store values above
+1.0 — the HDR lives in the **curve**, not in overbright pixels. Best default for
+editing, grading, and delivery.
+
+**EXR modes** — the *VFX/comp* path. All three write scene-linear OpenEXR
+sequences that **preserve the genuine overbright (>1.0) values**, differing only
+in color space:
+- **EXR · Rec.709** — Rec.709 primaries, for After Effects 32bpc compositing.
+- **EXR · ACEScg (AP1)** — ACES working space, for Nuke / Resolve ACES.
+- **EXR · ACES2065-1 (AP0)** — ACES interchange/archival container.
+
+Use an EXR mode any time you need true overbright energy in a compositor or an
+ACES pipeline.
+
+**One-line distinction:**
+- **Curve Expand** = remap existing values (no ML)
+- **HDR Graded** = ML reconstruction → finished video master (HDR in the *curve*)
+- **EXR** = ML reconstruction → scene-linear file with real overbright (HDR in the *values*)
 
 ---
 

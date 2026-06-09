@@ -151,7 +151,7 @@ export default function App() {
             scopeMode={scopeMode}
             onScopeMode={setScopeMode}
             api={API}
-            settings={{ preset, peak_nits: peakNits, tone_strength: toneStrength / 100 }}
+            settings={{ mode, preset, peak_nits: peakNits, tone_strength: toneStrength / 100 }}
           />
         </div>
       </div>

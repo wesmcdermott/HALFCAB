@@ -1,7 +1,7 @@
 import React, { useRef, useState, useEffect } from 'react'
 import styles from './VideoPlayer.module.css'
 
-export default function VideoPlayer({ filePath, onSeek }) {
+export default function VideoPlayer({ filePath, onSeek, api }) {
   const videoRef      = useRef()
   const [playing, setPlaying]   = useState(false)
   const [current, setCurrent]   = useState(0)
@@ -13,9 +13,12 @@ export default function VideoPlayer({ filePath, onSeek }) {
     const v = videoRef.current
     if (!v) return
     setPlaying(false); setCurrent(0)
-    v.src = filePath ? 'file://' + filePath : ''
+    // Stream via the backend (http) rather than file:// — works in dev (UI on
+    // http://localhost, where file:// is blocked by web security) and packaged.
+    const base = api || 'http://localhost:7892'
+    v.src = filePath ? `${base}/video?path=${encodeURIComponent(filePath)}` : ''
     if (filePath) v.load()
-  }, [filePath])
+  }, [filePath, api])
 
   const onLoadedMetadata = () => setDuration(videoRef.current?.duration || 0)
 

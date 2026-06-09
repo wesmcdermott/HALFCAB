@@ -188,7 +188,23 @@ def hdr_linear_to_hlg(hdr_lin_709):
     return np.clip(signal, 0, 1).astype(np.float32)
 
 
-def hdr_linear_to_graded(hdr_lin_709, knee=0.80, gamma=2.4):
+def _bt709_oetf(L):
+    """Rec.709/Rec.2020 opto-electronic transfer (encode linear → signal).
+    This is THE transfer the file is tagged with (trc=bt709), so encoding with
+    it makes the master self-consistent: any compliant player (QuickTime,
+    Premiere, Resolve) decodes it back to exactly `L`. No baked-in mismatch."""
+    L = np.clip(L, 0.0, 1.0)
+    return np.where(L < 0.018, 4.5 * L, 1.099 * np.power(L, 0.45) - 0.099).astype(np.float32)
+
+
+def _bt709_eotf(V):
+    """Inverse of _bt709_oetf (decode signal → linear). Used by the preview so
+    what's shown on screen is exactly what a player reconstructs from the file."""
+    V = np.clip(V, 0.0, 1.0)
+    return np.where(V < 0.081, V / 4.5, np.power((V + 0.099) / 1.099, 1.0 / 0.45)).astype(np.float32)
+
+
+def hdr_linear_to_graded(hdr_lin_709, knee=0.65, ceiling=0.82, gamma=2.4):
     """
     Convert scene-linear Rec.709 HDR → a CLEANLY-EXPOSED Rec.2020 video
     signal [0,1] with a smooth highlight shoulder — HDR-informed exposure,
@@ -196,10 +212,15 @@ def hdr_linear_to_graded(hdr_lin_709, knee=0.80, gamma=2.4):
 
     Take the gain-map HDR (overbright >1.0) and roll it gracefully into the
     [0,1] container:
-      - below `knee`: pass 1:1 (exposure preserved)
-      - above `knee`: the recovered overbright rolls into [knee,1] via a tanh
-        shoulder — graceful highlight falloff a colorist can pull back, not
-        a hard clip
+      - below `knee`: pass 1:1 (exposure preserved — midtones never move)
+      - above `knee`: the recovered overbright rolls into [knee, ceiling] via a
+        tanh shoulder — graceful highlight falloff a colorist can pull back, not
+        a hard clip. `ceiling` (<1.0) is the asymptote the brightest highlights
+        approach, so [ceiling, 1.0] stays EMPTY as grading headroom (highlights
+        don't slam the 1023 ceiling). knee=0.65/ceiling=0.82 lands peaks ~90%.
+
+    The shoulder slope is 1.0 at the knee (span cancels in the tanh), so the
+    transition from the 1:1 region is seamless regardless of knee/ceiling.
 
     Rec.709 → Rec.2020 primaries: besides the wider gamut, the 3×3 channel
     mix averages per-channel 8-bit-origin steps, which smooths banding.
@@ -207,13 +228,17 @@ def hdr_linear_to_graded(hdr_lin_709, knee=0.80, gamma=2.4):
     h, w, _ = hdr_lin_709.shape
     r2020 = (hdr_lin_709.reshape(-1, 3) @ _R709_TO_R2020.T).reshape(h, w, 3)
     r2020 = np.clip(r2020, 0, None)
+    span = ceiling - knee
     rolled = np.where(
         r2020 <= knee,
         r2020,
-        knee + (1.0 - knee) * np.tanh((r2020 - knee) / (1.0 - knee))
+        knee + span * np.tanh((r2020 - knee) / span)
     )
     rolled = np.clip(rolled, 0, 1)
-    signal = np.power(rolled, 1.0 / gamma)   # gamma 2.4 encode
+    # Encode with the Rec.709 OETF — the SAME transfer the file is tagged with
+    # (trc=bt709). Self-consistent: players decode it back to `rolled` exactly,
+    # so the export is color-accurate everywhere (no gamma-2.4-vs-bt709 mismatch).
+    signal = _bt709_oetf(rolled)
     return signal.astype(np.float32)
 
 
@@ -402,8 +427,9 @@ def ml_convert(src, out_path, peak_nits=1000, weights_path=None,
         os.makedirs(os.path.dirname(out_path) or '.', exist_ok=True)
         print('[ml_enhance] encoding …', flush=True)
 
-        # graded mode: Rec.2020 primaries, gamma-2.4 transfer — HDR-informed
-        #              gradeable master (use a Rec.2020 / gamma-2.4 sequence)
+        # graded mode: Rec.2020 primaries, Rec.709 (bt709) transfer — the signal
+        #              is bt709-encoded (see hdr_linear_to_graded) and tagged the
+        #              same, so it's color-accurate in any Rec.2020 sequence.
         prim, trc, mtx = 'bt2020', 'bt709', 'bt2020nc'
         subprocess.run([
             FFMPEG, '-y',
