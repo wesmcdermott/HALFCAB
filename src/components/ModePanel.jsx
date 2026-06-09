@@ -1,10 +1,11 @@
 import React from 'react'
 import styles from './ModePanel.module.css'
 
-// Every mode except Original uses the GMNet ML gain-map reconstruction;
+// Every mode except Curve Expand uses the GMNet ML gain-map reconstruction;
 // they differ only in the output format/color space (shown in `fmt`).
+// (id stays 'v1' for backend compatibility — only the display label changed.)
 const MODES = [
-  { id: 'v1',           label: 'Original',         ml: false, fmt: 'CURVES',
+  { id: 'v1',           label: 'Curve Expand',     ml: false, fmt: 'CURVES',
     desc: 'FFmpeg curve tone-map. Fast, no ML — expands existing values.' },
   { id: 'graded',       label: 'HDR Graded',       ml: true,  fmt: 'ProRes',
     desc: 'ML HDR reconstruction → filmic shoulder. Clean gradeable Rec.2020 master, no banding.' },

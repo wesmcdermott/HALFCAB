@@ -1,10 +1,19 @@
-import os, json, base64, subprocess, io, math, sys, signal
+import os, json, base64, subprocess, io, math, sys, signal, threading
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import numpy as np
 
 app = Flask(__name__)
 CORS(app)
+
+# Serialize ALL torch/MPS model inference. Flask's dev server is threaded, and
+# the OS GPU/MPS context is NOT safe to drive from two threads at once — a live
+# /preview-frame inference colliding with the async /ml-convert job (or a second
+# rapid preview) segfaults the whole Python process → the "Python quit" dialog.
+# One global lock means only one inference runs at a time; the interactive
+# preview uses a non-blocking acquire and degrades to the fast v1 preview if a
+# conversion is already using the model, instead of contending and crashing.
+ML_LOCK = threading.Lock()
 
 # Exit immediately and cleanly (code 0) when Electron sends SIGTERM/SIGINT on
 # quit. os._exit skips interpreter teardown — PyTorch/MPS destructors can throw
@@ -566,16 +575,57 @@ def preview_frame():
     time_s    = body.get('time',0)
     peak_nits = body.get('peak_nits',1000)
     strength  = body.get('tone_strength',0.85)
+    mode      = body.get('mode', 'graded')
     if not os.path.exists(src): return jsonify(ok=False, error='File not found')
 
-    lift = tone_lift_vf(strength, peak_nits)
-    vf   = lift + 'scale=960:-1,format=yuv420p'
-    cmd  = [FFMPEG,'-y','-ss',str(time_s),'-i',src,
-            '-vf',vf,'-vframes','1','-f','image2','-vcodec','mjpeg','-q:v','4','pipe:1']
-    r = subprocess.run(cmd, capture_output=True)
-    if r.returncode!=0 or not r.stdout: return jsonify(ok=False, error='Failed')
-
     frame_rgb = extract_frame_raw(src, time_s, width=960)
+
+    # The "Processed" preview must reflect the SELECTED mode's real output:
+    #   - graded / exr*: run the actual ML graded pipeline on this frame so
+    #     preview == export (was wrongly showing the v1 tone-lift before).
+    #   - v1: the FFmpeg curve lift.
+    preview_jpeg = None
+    # Only drive the model if no conversion (or other preview) holds the lock.
+    # Non-blocking: if busy, we skip ML and fall through to the v1 preview rather
+    # than running a second concurrent MPS inference (which crashes Python).
+    got_lock = mode != 'v1' and frame_rgb is not None and ML_LOCK.acquire(blocking=False)
+    if got_lock:
+        try:
+            sys.path.insert(0, os.path.dirname(__file__))
+            import ml_enhance, torch
+            dev = (torch.device('mps') if torch.backends.mps.is_available()
+                   else torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu'))
+            net  = ml_enhance._load_gmnet(dev)
+            gain = ml_enhance.infer_gainmap(frame_rgb, dev, net)
+            hdr  = ml_enhance.sdr_to_hdr(frame_rgb, gain, peak=8.0, dither=False)
+            sig  = ml_enhance.hdr_linear_to_graded(hdr)   # Rec.2020, bt709-encoded
+            # Decode with the SAME transfer the file is tagged with (bt709) — this
+            # is exactly what a compliant player reconstructs, so preview == export.
+            # Then Rec.2020→709 gamut conversion in linear, re-encode sRGB for the
+            # monitor.
+            r2020_to_709 = np.linalg.inv(ml_enhance._R709_TO_R2020).astype(np.float32)
+            lin  = ml_enhance._bt709_eotf(sig)
+            disp = lin.reshape(-1,3) @ r2020_to_709.T
+            disp = np.power(np.clip(disp,0,1), 1/2.2).reshape(sig.shape)
+            import cv2
+            ok, buf = cv2.imencode('.jpg', (disp[:,:,::-1]*255).astype(np.uint8),
+                                   [cv2.IMWRITE_JPEG_QUALITY, 88])
+            if ok: preview_jpeg = base64.b64encode(buf.tobytes()).decode()
+        except Exception as e:
+            print('[preview] ML preview failed, falling back:', e, file=sys.stderr)
+        finally:
+            ML_LOCK.release()
+
+    if preview_jpeg is None:
+        # v1 (or fallback): FFmpeg curve lift
+        lift = tone_lift_vf(strength, peak_nits)
+        vf   = lift + 'scale=960:-1,format=yuv420p'
+        cmd  = [FFMPEG,'-y','-ss',str(time_s),'-i',src,
+                '-vf',vf,'-vframes','1','-f','image2','-vcodec','mjpeg','-q:v','4','pipe:1']
+        r = subprocess.run(cmd, capture_output=True)
+        if r.returncode!=0 or not r.stdout: return jsonify(ok=False, error='Failed')
+        preview_jpeg = base64.b64encode(r.stdout).decode()
+
     overlay_b64, stats = None, None
     if frame_rgb is not None:
         ov, ostats = make_hdr_overlay(frame_rgb)
@@ -592,7 +642,7 @@ def preview_frame():
             'scale':         round(1.0/imax,2),
         }
 
-    return jsonify(ok=True, frame=base64.b64encode(r.stdout).decode(),
+    return jsonify(ok=True, frame=preview_jpeg,
                    overlay=overlay_b64, stats=stats)
 
 
@@ -715,7 +765,7 @@ def ml_convert_route():
     output_format: 'prores' (HLG video) or 'exr' (linear sequence for AE/Nuke).
     Runs asynchronously — returns a job_id; poll /ml-progress/<job_id>.
     """
-    import threading, uuid
+    import uuid
     body      = request.json
     src       = body['input']
     peak_nits = body.get('peak_nits', 1000)
@@ -747,8 +797,11 @@ def ml_convert_route():
             def cb(done, total):
                 _ml_progress[job_id].update({'done': done, 'total': total, 'status': 'running'})
 
-            result = ml_convert(src, out, peak_nits=peak_nits,
-                                output_format=out_fmt, progress_cb=cb)
+            # Hold the inference lock for the whole job so interactive previews
+            # don't drive MPS concurrently (which crashes the process).
+            with ML_LOCK:
+                result = ml_convert(src, out, peak_nits=peak_nits,
+                                    output_format=out_fmt, progress_cb=cb)
             _ml_progress[job_id].update({'status': 'done', 'output': result,
                                          'done': _ml_progress[job_id]['total']})
         except Exception as e:
@@ -771,6 +824,65 @@ def ml_progress(job_id):
 @app.route('/health')
 def health():
     return jsonify(ok=True)
+
+
+@app.route('/video')
+def video():
+    """Stream a local video over HTTP with byte-range support so the <video>
+    element can play AND seek. Needed because in dev the UI is served from
+    http://localhost and (with webSecurity on) an http page can't load file://
+    sources directly. Serving the file over http works in dev and packaged."""
+    from flask import Response
+    path = request.args.get('path', '')
+    if not path or not os.path.exists(path):
+        return jsonify(ok=False, error='File not found'), 404
+
+    file_size = os.path.getsize(path)
+    ext = os.path.splitext(path)[1].lower()
+    mime = {'.mp4':'video/mp4', '.mov':'video/quicktime', '.mkv':'video/x-matroska',
+            '.webm':'video/webm', '.avi':'video/x-msvideo', '.m4v':'video/mp4'}.get(ext, 'video/mp4')
+
+    range_header = request.headers.get('Range', None)
+    if range_header:
+        # e.g. "bytes=12345-" or "bytes=12345-67890"
+        try:
+            units, rng = range_header.split('=')
+            start_s, end_s = (rng.split('-') + [''])[:2]
+            start = int(start_s) if start_s else 0
+            end   = int(end_s) if end_s else file_size - 1
+        except Exception:
+            start, end = 0, file_size - 1
+        start = max(0, start); end = min(end, file_size - 1)
+        length = end - start + 1
+
+        def gen():
+            with open(path, 'rb') as f:
+                f.seek(start)
+                remaining = length
+                while remaining > 0:
+                    chunk = f.read(min(65536, remaining))
+                    if not chunk: break
+                    remaining -= len(chunk)
+                    yield chunk
+
+        resp = Response(gen(), status=206, mimetype=mime, direct_passthrough=True)
+        resp.headers['Content-Range']   = f'bytes {start}-{end}/{file_size}'
+        resp.headers['Accept-Ranges']   = 'bytes'
+        resp.headers['Content-Length']  = str(length)
+        return resp
+
+    # No range — stream the whole file
+    def gen_all():
+        with open(path, 'rb') as f:
+            while True:
+                chunk = f.read(65536)
+                if not chunk: break
+                yield chunk
+    resp = Response(gen_all(), mimetype=mime, direct_passthrough=True)
+    resp.headers['Accept-Ranges']  = 'bytes'
+    resp.headers['Content-Length'] = str(file_size)
+    return resp
+
 
 if __name__ == '__main__':
     app.run(port=7892, debug=False)

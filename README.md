@@ -50,11 +50,11 @@ Right-click → Open → Open to bypass.
 2. **Analyze** (optional) — **⬡ Analyze Video** scans 8 frames and suggests settings.
 3. **Pick a mode** — see table below.
 4. **Peak Brightness** — **1000 nits** for most delivery.
-5. **Convert** — Original is instant; HDR Graded / EXR run frame-by-frame.
+5. **Convert** — Curve Expand is instant; HDR Graded / EXR run frame-by-frame.
 
 | Mode | Use when… |
 |---|---|
-| **Original** | Fast, predictable expand (no ML) |
+| **Curve Expand** | Fast, predictable expand (no ML) |
 | **HDR Graded** | Finished gradeable Rec.2020 master, no banding — *best default* |
 | **EXR · Rec.709** | After Effects compositing (32 bpc) |
 | **EXR · ACEScg** | Nuke / Resolve ACES working space |
